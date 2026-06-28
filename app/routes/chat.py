@@ -28,7 +28,7 @@ class CustomerChatRequest(BaseModel):
 def build_owner_context():
     try:
         bookings = supabase.table("bookings").select("*").order("Date", desc=True).limit(50).execute().data
-        slots = supabase.table("slots").select("*").order("date").limit(14).execute().data
+        slots = supabase.table("slots").select("*").order("Date").limit(14).execute().data
         leads = supabase.table("leads").select("*").order("created_at", desc=True).limit(20).execute().data
 
         today = str(date.today())
@@ -45,7 +45,7 @@ UNPAID BOOKINGS ({len(unpaid)} total):
 {chr(10).join([f"- {b.get('Date')} | {b.get('Name')} | {b.get('Phone')} | {b.get('Device')}" for b in unpaid[:10]]) or "None"}
 
 SLOT AVAILABILITY:
-{chr(10).join([f"- {s.get('date')}: {s.get('available')} available, {s.get('booked')} booked" for s in slots]) or "No slot data"}
+{chr(10).join([f"- {s.get('Date')}: {s.get('available')} available, {s.get('booked')} booked" for s in slots]) or "No slot data"}
 
 LEADS ({len(leads)} total, last 10):
 {chr(10).join([f"- {l.get('Name')} | {l.get('Phone')} | {l.get('Device')} | {l.get('Issue')}" for l in leads[:10]]) or "None"}
@@ -87,7 +87,7 @@ RULES:
 @router.post("/customer")
 def customer_chat(req: CustomerChatRequest):
     try:
-        slots = supabase.table("slots").select("*").order("date").limit(7).execute().data
+        f"- {s.get('Date')}: {s.get('available')} slots available"
         available_slots = [s for s in slots if (s.get("available") or 0) > 0]
 
         system_prompt = f"""You are a friendly booking assistant for iRepair — an iPhone repair shop in Lahore, Pakistan.
