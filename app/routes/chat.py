@@ -20,6 +20,7 @@ class Message(BaseModel):
 
 class OwnerChatRequest(BaseModel):
     messages: List[Message]
+    context: Optional[dict] = None
 
 class CustomerChatRequest(BaseModel):
     message: str
@@ -57,7 +58,26 @@ LEADS ({len(leads)} total, last 10):
 @router.post("/owner")
 def owner_chat(req: OwnerChatRequest, user=Depends(verify_token)):
     try:
-        context = build_owner_context()
+        if req.context:
+            bookings = req.context.get("bookings", [])
+            slots = req.context.get("slots", [])
+            leads = req.context.get("leads", [])
+            today = str(date.today())
+            context = f"""
+=== iRepair Shop — Live Data (as of {today}) ===
+
+BOOKINGS ({len(bookings)} total):
+{chr(10).join([f"- {b.get('Date')} {b.get('Time')} | {b.get('Name')} | {b.get('Phone')} | {b.get('Device')} | {b.get('Service')} | {b.get('Status')} | {b.get('Payment Status')}" for b in bookings[:30]]) or "None"}
+
+SLOTS:
+{chr(10).join([f"- {s.get('Date')}: {s.get('available')} available, {s.get('booked')} booked" for s in slots]) or "No slot data"}
+
+LEADS ({len(leads)} total):
+{chr(10).join([f"- {l.get('Name')} | {l.get('Phone')} | {l.get('Device')} | {l.get('Issue')}" for l in leads[:10]]) or "None"}
+""".strip()
+        else:
+            context = build_owner_context()
+
         system_prompt = f"""You are iRepair Assistant — the smartest employee at an iPhone repair shop in Lahore called iRepair.
 
 RULES:
@@ -87,7 +107,7 @@ RULES:
 @router.post("/customer")
 def customer_chat(req: CustomerChatRequest):
     try:
-        f"- {s.get('Date')}: {s.get('available')} slots available"
+        slots = supabase.table("slots").select("*").order("Date").limit(7).execute().data
         available_slots = [s for s in slots if (s.get("available") or 0) > 0]
 
         system_prompt = f"""You are a friendly booking assistant for iRepair — an iPhone repair shop in Lahore, Pakistan.
@@ -99,7 +119,7 @@ YOUR JOB:
 - Reply in the same language the customer uses (English, Urdu, or Roman Urdu)
 
 AVAILABLE SLOTS:
-{chr(10).join([f"- {s.get('date')}: {s.get('available')} slots available" for s in available_slots]) or "Please call us to check availability"}
+{chr(10).join([f"- {s.get('Date')}: {s.get('available')} slots available" for s in available_slots]) or "Please call us to check availability"}
 
 SERVICES WE OFFER:
 - Screen Repair
@@ -131,7 +151,6 @@ IMPORTANT: Only output the BOOK: line when you have ALL 6 pieces of info."""
         )
         reply = res.choices[0].message.content
 
-        # Parse and auto-create booking if AI collected all info
         booking_created = False
         if "BOOK:" in reply:
             try:
