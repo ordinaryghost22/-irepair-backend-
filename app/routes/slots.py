@@ -15,8 +15,8 @@ class SlotUpdate(BaseModel):
 @router.get("/")
 def get_slots(user=Depends(verify_token)):
     try:
-        res = supabase.table("slots").select("*").order("date").execute()
-        return {"data": res.data, "count": len(res.data)}
+        res = supabase.table("slots").select("*").order("Date").execute()
+        return res.data  # plain array
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -27,6 +27,6 @@ def update_slot(slot_id: str, slot: SlotUpdate, user=Depends(verify_token)):
         if slot.available is not None: data["available"] = slot.available
         if slot.booked is not None: data["booked"] = slot.booked
         res = supabase.table("slots").update(data).eq("id", slot_id).execute()
-        return {"message": "Slot updated", "data": res.data}
+        return res.data[0] if res.data else {}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

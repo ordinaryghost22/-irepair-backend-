@@ -18,7 +18,7 @@ class Lead(BaseModel):
 def get_leads(user=Depends(verify_token)):
     try:
         res = supabase.table("leads").select("*").order("created_at", desc=True).execute()
-        return {"data": res.data, "count": len(res.data)}
+        return res.data  # plain array
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -32,6 +32,6 @@ def create_lead(lead: Lead, user=Depends(verify_token)):
             "Issue": lead.issue,
         }
         res = supabase.table("leads").insert(data).execute()
-        return {"message": "Lead created", "data": res.data}
+        return res.data[0] if res.data else {}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

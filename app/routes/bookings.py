@@ -34,21 +34,27 @@ class BookingUpdate(BaseModel):
     payment_status: Optional[str] = None
     notes: Optional[str] = None
 
+class StatusUpdate(BaseModel):
+    Status: str
+
+class PaymentUpdate(BaseModel):
+    payment_status: str
+
 @router.get("/")
 def get_bookings(user=Depends(verify_token)):
     try:
         res = supabase.table("bookings").select("*").order("Date", desc=True).execute()
-        return {"data": res.data, "count": len(res.data)}
+        return res.data  # plain array
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/{booking_id}")
 def get_booking(booking_id: str, user=Depends(verify_token)):
     try:
-        res = supabase.table("bookings").select("*").eq("id", booking_id).single().execute()
+        res = supabase.table("bookings").select("*").eq("Booking ID", booking_id).execute()
         if not res.data:
             raise HTTPException(status_code=404, detail="Booking not found")
-        return res.data
+        return res.data[0]
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -69,7 +75,7 @@ def create_booking(booking: Booking, user=Depends(verify_token)):
             "Notes": booking.notes,
         }
         res = supabase.table("bookings").insert(data).execute()
-        return {"message": "Booking created", "data": res.data}
+        return res.data[0] if res.data else {}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -77,26 +83,42 @@ def create_booking(booking: Booking, user=Depends(verify_token)):
 def update_booking(booking_id: str, booking: BookingUpdate, user=Depends(verify_token)):
     try:
         data = {}
-        if booking.name: data["Name"] = booking.name
-        if booking.phone: data["Phone"] = booking.phone
-        if booking.email: data["Email"] = booking.email
-        if booking.device: data["Device"] = booking.device
-        if booking.service: data["Service"] = booking.service
-        if booking.issue: data["Issue"] = booking.issue
-        if booking.date: data["Date"] = booking.date
-        if booking.time: data["Time"] = booking.time
-        if booking.status: data["Status"] = booking.status
-        if booking.payment_status: data["Payment Status"] = booking.payment_status
-        if booking.notes: data["Notes"] = booking.notes
-        res = supabase.table("bookings").update(data).eq("id", booking_id).execute()
-        return {"message": "Booking updated", "data": res.data}
+        if booking.name is not None: data["Name"] = booking.name
+        if booking.phone is not None: data["Phone"] = booking.phone
+        if booking.email is not None: data["Email"] = booking.email
+        if booking.device is not None: data["Device"] = booking.device
+        if booking.service is not None: data["Service"] = booking.service
+        if booking.issue is not None: data["Issue"] = booking.issue
+        if booking.date is not None: data["Date"] = booking.date
+        if booking.time is not None: data["Time"] = booking.time
+        if booking.status is not None: data["Status"] = booking.status
+        if booking.payment_status is not None: data["Payment Status"] = booking.payment_status
+        if booking.notes is not None: data["Notes"] = booking.notes
+        res = supabase.table("bookings").update(data).eq("Booking ID", booking_id).execute()
+        return res.data[0] if res.data else {}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.put("/{booking_id}/status")
+def update_booking_status(booking_id: str, body: StatusUpdate, user=Depends(verify_token)):
+    try:
+        res = supabase.table("bookings").update({"Status": body.Status}).eq("Booking ID", booking_id).execute()
+        return res.data[0] if res.data else {}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.put("/{booking_id}/payment")
+def update_booking_payment(booking_id: str, body: PaymentUpdate, user=Depends(verify_token)):
+    try:
+        res = supabase.table("bookings").update({"Payment Status": body.payment_status}).eq("Booking ID", booking_id).execute()
+        return res.data[0] if res.data else {}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.delete("/{booking_id}")
 def delete_booking(booking_id: str, user=Depends(verify_token)):
     try:
-        supabase.table("bookings").delete().eq("id", booking_id).execute()
+        supabase.table("bookings").delete().eq("Booking ID", booking_id).execute()
         return {"message": "Booking deleted"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
