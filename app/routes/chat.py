@@ -62,12 +62,15 @@ def owner_chat(req: OwnerChatRequest, user=Depends(verify_token)):
             bookings = req.context.get("bookings", [])
             slots = req.context.get("slots", [])
             leads = req.context.get("leads", [])
+            revenue = req.context.get("revenue", 0)
             today = str(date.today())
             context = f"""
 === iRepair Shop — Live Data (as of {today}) ===
 
 BOOKINGS ({len(bookings)} total):
 {chr(10).join([f"- {b.get('Date')} {b.get('Time')} | {b.get('Name')} | {b.get('Phone')} | {b.get('Device')} | {b.get('Service')} | {b.get('Status')} | {b.get('Payment Status')}" for b in bookings[:30]]) or "None"}
+
+REVENUE (confirmed bookings): Rs{revenue:,}
 
 SLOTS:
 {chr(10).join([f"- {s.get('Date')}: {s.get('available')} available, {s.get('booked')} booked" for s in slots]) or "No slot data"}
