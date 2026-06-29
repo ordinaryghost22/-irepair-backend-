@@ -155,11 +155,11 @@ IMPORTANT: Only output the BOOK: line when you have ALL 6 pieces of info."""
         reply = res.choices[0].message.content
 
         booking_created = False
+        info = {}
         if "BOOK:" in reply:
             try:
                 book_line = [l for l in reply.split("\n") if l.startswith("BOOK:")][0]
                 parts = book_line.replace("BOOK:", "").strip().split("|")
-                info = {}
                 for p in parts:
                     k, v = p.split("=", 1)
                     info[k.strip()] = v.strip()
@@ -183,6 +183,6 @@ IMPORTANT: Only output the BOOK: line when you have ALL 6 pieces of info."""
             except Exception as e:
                 print(f"Booking creation error: {e}")
 
-        return {"reply": reply, "booking_created": booking_created}
+        return {"reply": reply, "booking_created": booking_created, "booking_info": info if booking_created else None}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
