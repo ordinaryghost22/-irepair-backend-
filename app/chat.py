@@ -7,12 +7,54 @@ from app.config import SUPABASE_URL, SUPABASE_KEY, GROQ_API_KEY
 from app.auth import verify_token
 import uuid
 import re
+import time
+import logging
 from datetime import date, timedelta, datetime
+
+# ── Structured logging ──────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | chat | %(message)s",
+)
+logger = logging.getLogger("fixpro_chat")
 
 router = APIRouter()
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 groq_client = Groq(api_key=GROQ_API_KEY)
 GROQ_MODEL = "llama-3.3-70b-versatile"
+
+# ── Rate limiting ────────────────────────────────────────────────────────────────
+# Simple sliding-window limiter keyed by session_id, in-process.
+# Good enough for a single-instance Railway deployment.
+RATE_LIMIT_MAX_MESSAGES = 15
+RATE_LIMIT_WINDOW_SECONDS = 60
+_rate_limit_log: Dict[str, list] = {}
+
+def is_rate_limited(session_id: str) -> bool:
+    now = time.time()
+    timestamps = _rate_limit_log.get(session_id, [])
+    timestamps = [t for t in timestamps if now - t < RATE_LIMIT_WINDOW_SECONDS]
+    timestamps.append(now)
+    _rate_limit_log[session_id] = timestamps
+    if len(timestamps) > RATE_LIMIT_MAX_MESSAGES:
+        logger.warning(f"Rate limit hit for session {session_id} ({len(timestamps)} msgs/{RATE_LIMIT_WINDOW_SECONDS}s)")
+        return True
+    return False
+
+# ── Safe Groq wrapper (graceful fallback on outage/timeout) ──────────────────────
+def safe_groq_call(messages: list, max_tokens: int = 300, temperature: float = 0.4, fallback: str = None) -> str:
+    try:
+        res = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            timeout=12,
+        )
+        return res.choices[0].message.content
+    except Exception as e:
+        logger.error(f"Groq API call failed: {e}")
+        return fallback or "Sorry, I'm having trouble responding right now. Please call us at +92 300 1234567 or try again in a moment."
 
 # ── Session cache is defined later near the persistent session functions ──────
 
@@ -271,9 +313,11 @@ Do NOT ask if they want to book — they're already mid-booking, just answer and
             model=GROQ_MODEL,
             messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": msg}],
             max_tokens=150, temperature=0.4,
+            timeout=10,
         )
         return res.choices[0].message.content
-    except Exception:
+    except Exception as e:
+        logger.error(f"Off-track question answer failed: {e}")
         return r("I'll answer that in a moment — let's finish your booking first.",
                   "Iska jawab thori dair mein dunga — pehle booking complete kar lein.",
                   "اس کا جواب جلد دوں گا — پہلے بکنگ مکمل کر لیں۔", lang)
@@ -567,9 +611,10 @@ RULES:
 
         messages = [{"role": "system", "content": system_prompt}]
         messages += [{"role": m.role, "content": m.content} for m in req.messages]
-        res = groq_client.chat.completions.create(model=GROQ_MODEL, messages=messages, max_tokens=600, temperature=0.4)
+        res = groq_client.chat.completions.create(model=GROQ_MODEL, messages=messages, max_tokens=600, temperature=0.4, timeout=15)
         return {"reply": res.choices[0].message.content}
     except Exception as e:
+        logger.error(f"Owner chat failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -579,15 +624,25 @@ RULES:
 @router.post("/customer")
 def customer_chat(req: CustomerChatRequest):
     session_id = req.session_id or str(uuid.uuid4())
+
+    if is_rate_limited(session_id):
+        return respond(
+            "You're sending messages a bit fast! Please wait a moment and try again. 😊",
+            session_id, typing_delay_ms=0
+        )
+
     session = get_session(session_id)
+    logger.info(f"[{session_id}] step={session.get('step')} msg={req.message[:80]!r}")
     try:
         result = _handle_customer_message(req, session_id, session)
         save_session(session_id, session)
+        logger.info(f"[{session_id}] -> step={session.get('step')}")
         return result
     except HTTPException:
         save_session(session_id, session)
         raise
     except Exception as e:
+        logger.error(f"[{session_id}] Unhandled error: {e}")
         save_session(session_id, session)
         return respond("Sorry, something went wrong. Please try again.", session_id, typing_delay_ms=0)
 
@@ -907,12 +962,11 @@ Reply with ONLY: BOOKING or QUESTION
 
 Message: {msg}"""
 
-            classify_res = groq_client.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=[{"role": "user", "content": classify_prompt}],
+            intent = safe_groq_call(
+                [{"role": "user", "content": classify_prompt}],
                 max_tokens=10, temperature=0,
-            )
-            intent = classify_res.choices[0].message.content.strip().upper()
+                fallback="QUESTION"
+            ).strip().upper()
 
             if "BOOKING" in intent:
                 session["step"] = "get_device"
@@ -934,8 +988,14 @@ AVAILABLE DATES:
 {slots_text}"""
                 history_msgs = [{"role": "system", "content": system_prompt}]
                 history_msgs += session["history"][-6:]
-                res = groq_client.chat.completions.create(model=GROQ_MODEL, messages=history_msgs, max_tokens=250, temperature=0.4)
-                reply = res.choices[0].message.content
+                reply = safe_groq_call(
+                    history_msgs, max_tokens=250, temperature=0.4,
+                    fallback=r(
+                        "I'm having a little trouble right now — please call us at +92 300 1234567, or try asking again in a moment.",
+                        "Abhi thori dair ke liye masla aa raha hai — +92 300 1234567 pe call karein ya dobara koshish karein.",
+                        "ابھی مسئلہ ہے — براہ کرم +92 300 1234567 پر کال کریں۔", lang
+                    )
+                )
 
             session["history"].append({"role": "assistant", "content": reply})
             return respond(reply, session_id,
@@ -1174,7 +1234,9 @@ AVAILABLE DATES:
                         "Notes": "Booked via customer chatbot",
                     }).execute()
                     book_slot(collected.get("date", ""), collected.get("time", ""), collected.get("phone", ""), booking_id)
+                    logger.info(f"Booking created: {booking_id} | {collected.get('phone')} | {collected.get('date')} {collected.get('time')}")
                 except Exception as e:
+                    logger.error(f"Booking insert failed for {collected.get('phone')}: {e}")
                     save_lead(collected)
                     return respond(
                         r("Sorry, something went wrong saving your booking. We've noted your details — please call us at +92 300 1234567 to confirm.",
