@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from app.routes import bookings, slots, leads, chat, auth
 
 app = FastAPI(
@@ -7,6 +8,9 @@ app = FastAPI(
     description="Backend for iRepair Dashboard",
     version="1.0.0"
 )
+
+# Trust Railway's proxy headers so HTTPS is correctly identified
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 
 app.add_middleware(
     CORSMiddleware,
