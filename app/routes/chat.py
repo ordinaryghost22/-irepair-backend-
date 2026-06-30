@@ -295,8 +295,8 @@ def is_valid_email(email: str) -> bool:
 # ── Time validator ─────────────────────────────────────────────────────────────
 SHOP_OPEN = 10
 SHOP_CLOSE = 20
-TIME_SLOTS = ["10:00 AM", "11:00 AM", "12:00 PM", "1:00 PM", "2:00 PM",
-              "3:00 PM", "4:00 PM", "5:00 PM", "6:00 PM", "7:00 PM"]
+TIME_SLOTS_24H = ["10:00", "11:00", "12:00", "13:00", "14:00",
+                  "15:00", "16:00", "17:00", "18:00", "19:00"]
 
 def format_time_display(time_24: str) -> str:
     """Convert internal 24-hour 'HH:MM' to friendly '1:00 PM' for messages only."""
@@ -364,7 +364,12 @@ def build_slot_buttons(dates: list) -> list:
     return dates
 
 def build_time_buttons(times: list) -> list:
-    return times
+    """Returns list of {label, value} dicts: label is 12-hour for display,
+    value is the original 24-hour string that matches Supabase exactly."""
+    result = []
+    for t in times:
+        result.append({"label": format_time_display(t), "value": t})
+    return result
 
 def book_slot(booking_date: str, booking_time: str, phone: str, booking_id: str) -> bool:
     """Marks a specific Date+Time slot as Booked and links it to the booking."""
@@ -627,7 +632,7 @@ def customer_chat(req: CustomerChatRequest):
             if step in ("get_time", "get_new_time"):
                 d = collected.get("date") or collected.get("new_date") or ""
                 times = get_available_times(d)
-                return respond(combined, session_id, time_buttons=build_time_buttons(times) or TIME_SLOTS)
+                return respond(combined, session_id, time_buttons=build_time_buttons(times) or build_time_buttons(TIME_SLOTS_24H))
             return respond(combined, session_id)
 
         # ════════════════════════════════════════════════════════════════════
@@ -768,7 +773,7 @@ def customer_chat(req: CustomerChatRequest):
             collected["new_date"] = parsed
             session["step"] = "get_new_time"
             times = get_available_times(parsed)
-            time_btns = build_time_buttons(times) or TIME_SLOTS
+            time_btns = build_time_buttons(times) or build_time_buttons(TIME_SLOTS_24H)
             return respond(
                 r(f"✅ {parsed} works!\n\nWhat time would you prefer? (Our hours: 10 AM – 8 PM)",
                   f"✅ {parsed} theek hai!\n\nKaun sa waqt chahiye? (10 AM – 8 PM)",
@@ -784,7 +789,7 @@ def customer_chat(req: CustomerChatRequest):
                     r("Please give a valid time between 10 AM and 8 PM (e.g. '2 PM', '4:30 PM')",
                       "10 AM se 8 PM ke beech ka waqt dijiye",
                       "10 بجے سے 8 بجے کے درمیان وقت دیں", lang),
-                    session_id, time_buttons=build_time_buttons(times) or TIME_SLOTS
+                    session_id, time_buttons=build_time_buttons(times) or build_time_buttons(TIME_SLOTS_24H)
                 )
             if not is_slot_available(collected.get("new_date", ""), parsed_time):
                 times = get_available_times(collected.get("new_date", ""))
@@ -792,7 +797,7 @@ def customer_chat(req: CustomerChatRequest):
                     r("Sorry, that time just got booked! Please pick another time.",
                       "Sorry, yeh waqt abhi book ho gaya! Doosra waqt chunein.",
                       "معذرت، یہ وقت ابھی بک ہو گیا!", lang),
-                    session_id, time_buttons=build_time_buttons(times) or TIME_SLOTS
+                    session_id, time_buttons=build_time_buttons(times) or build_time_buttons(TIME_SLOTS_24H)
                 )
             collected["new_time"] = parsed_time
             session["step"] = "confirm_reschedule"
@@ -949,7 +954,7 @@ AVAILABLE DATES:
             collected["date"] = parsed
             session["step"] = "get_time"
             times = get_available_times(parsed)
-            time_btns = build_time_buttons(times) or TIME_SLOTS
+            time_btns = build_time_buttons(times) or build_time_buttons(TIME_SLOTS_24H)
             reply = r(
                 f"✅ {parsed} works!\n\nWhat time do you prefer? Our hours: 10 AM – 8 PM",
                 f"✅ {parsed} theek hai!\n\nKaun sa waqt chahiye? Hum 10 AM – 8 PM tak khule hain.",
@@ -969,7 +974,7 @@ AVAILABLE DATES:
                     r("Please give a valid time between 10 AM and 8 PM (e.g. '2 PM', '4:30 PM')",
                       "10 AM se 8 PM ke beech waqt dijiye",
                       "10 بجے سے 8 بجے کے درمیان وقت دیں", lang),
-                    session_id, time_buttons=build_time_buttons(times) or TIME_SLOTS
+                    session_id, time_buttons=build_time_buttons(times) or build_time_buttons(TIME_SLOTS_24H)
                 )
             if not is_slot_available(collected.get("date", ""), parsed_time):
                 times = get_available_times(collected.get("date", ""))
@@ -977,7 +982,7 @@ AVAILABLE DATES:
                     r("Sorry, that time just got booked! Please pick another time.",
                       "Sorry, yeh waqt abhi book ho gaya! Doosra waqt chunein.",
                       "معذرت، یہ وقت ابھی بک ہو گیا!", lang),
-                    session_id, time_buttons=build_time_buttons(times) or TIME_SLOTS
+                    session_id, time_buttons=build_time_buttons(times) or build_time_buttons(TIME_SLOTS_24H)
                 )
             collected["time"] = parsed_time
             session["step"] = "get_name"
