@@ -70,7 +70,6 @@ Q: Can I get a price quote?
 A: Yes! Prices depend on iPhone model. Share your model and issue for an exact quote.
 """
 
-# Service wait times
 WAIT_TIMES = {
     "screen": "1–2 hours",
     "battery": "30–45 minutes",
@@ -235,27 +234,72 @@ def parse_time(text: str) -> Optional[str]:
     meridiem = m.group(3)
     if meridiem == 'pm' and hour != 12: hour += 12
     if meridiem == 'am' and hour == 12: hour = 0
-    if hour >= 7 and hour < 10 and not meridiem: hour += 12  # assume PM for ambiguous hours
+    if hour >= 7 and hour < 10 and not meridiem: hour += 12
     if not (SHOP_OPEN <= hour < SHOP_CLOSE): return None
-    return f"{hour:02d}:{mins:02d}"
+    display_hour = hour if hour <= 12 else hour - 12
+    if display_hour == 0: display_hour = 12
+    meridiem_out = "AM" if hour < 12 else "PM"
+    return f"{display_hour}:{mins:02d} {meridiem_out}"
 
-# ── Slot helpers ───────────────────────────────────────────────────────────────
-def get_available_slots():
+# ══════════════════════════════════════════════════════════════════════════════
+# SLOT HELPERS — matches real table: id, Date, Time, Status, Booked By, Day, Phone, Booking ID
+# ══════════════════════════════════════════════════════════════════════════════
+def get_available_dates():
+    """Returns list of distinct dates that have at least one Available slot."""
     try:
-        res = supabase.table("slots").select("*").order("Date").limit(14).execute()
-        return [s for s in res.data if (s.get("available") or 0) > 0]
+        res = supabase.table("slots").select("Date").eq("Status", "Available").order("Date").execute()
+        seen = []
+        for row in res.data:
+            d = row.get("Date")
+            if d and d not in seen:
+                seen.append(d)
+        return seen[:14]
     except: return []
 
-def is_slot_available(booking_date: str) -> bool:
+def get_available_times(booking_date: str):
+    """Returns list of available Time strings for a specific date."""
     try:
-        res = supabase.table("slots").select("*").eq("Date", booking_date).execute()
-        if not res.data: return True
-        return (res.data[0].get("available") or 0) > 0
+        res = supabase.table("slots").select("Time").eq("Date", booking_date).eq("Status", "Available").order("Time").execute()
+        return [row.get("Time") for row in res.data if row.get("Time")]
+    except: return []
+
+def is_slot_available(booking_date: str, booking_time: str = None) -> bool:
+    try:
+        q = supabase.table("slots").select("*").eq("Date", booking_date).eq("Status", "Available")
+        if booking_time:
+            q = q.eq("Time", booking_time)
+        res = q.execute()
+        return len(res.data) > 0
     except: return True
 
-def build_slot_buttons(slots: list) -> list:
-    """Return list of date strings for frontend to render as buttons."""
-    return [s.get("Date") for s in slots if s.get("Date")]
+def build_slot_buttons(dates: list) -> list:
+    return dates
+
+def build_time_buttons(times: list) -> list:
+    return times
+
+def book_slot(booking_date: str, booking_time: str, phone: str, booking_id: str) -> bool:
+    """Marks a specific Date+Time slot as Booked and links it to the booking."""
+    try:
+        res = supabase.table("slots").update({
+            "Status": "Booked",
+            "Booked By": phone,
+            "Phone": phone,
+            "Booking ID": booking_id,
+        }).eq("Date", booking_date).eq("Time", booking_time).eq("Status", "Available").execute()
+        return len(res.data) > 0
+    except: return False
+
+def free_slot_by_booking_id(booking_id: str):
+    """Frees up a slot when a booking is cancelled or rescheduled away from it."""
+    try:
+        supabase.table("slots").update({
+            "Status": "Available",
+            "Booked By": "EMPTY",
+            "Phone": "EMPTY",
+            "Booking ID": "",
+        }).eq("Booking ID", booking_id).execute()
+    except: pass
 
 # ── Duplicate booking check ────────────────────────────────────────────────────
 def has_duplicate_booking(phone: str, booking_date: str) -> bool:
@@ -280,6 +324,7 @@ def find_booking_by_phone(phone: str) -> Optional[dict]:
 def cancel_booking_by_id(booking_id: str):
     try:
         supabase.table("bookings").update({"Status": "Cancelled"}).eq("Booking ID", booking_id).execute()
+        free_slot_by_booking_id(booking_id)
     except: pass
 
 # ── Session manager ────────────────────────────────────────────────────────────
@@ -290,7 +335,7 @@ def get_session(session_id: str) -> dict:
             "language": None,
             "collected": {},
             "history": [],
-            "mode": None,  # 'booking' | 'reschedule' | 'cancel'
+            "mode": None,
         }
     return sessions[session_id]
 
@@ -325,11 +370,17 @@ def r(english: str, roman: str, urdu: str, lang: str) -> str:
 def build_owner_context():
     try:
         bookings = supabase.table("bookings").select("*").order("Date", desc=True).limit(50).execute().data
-        slots = supabase.table("slots").select("*").order("Date").limit(14).execute().data
+        slots = supabase.table("slots").select("*").eq("Status", "Available").order("Date").limit(30).execute().data
         leads = supabase.table("leads").select("*").order("created_at", desc=True).limit(20).execute().data
         today = str(date.today())
         upcoming = [b for b in bookings if (b.get("Date") or "")[:10] >= today]
         unpaid = [b for b in bookings if (b.get("Payment Status") or "").lower() == "unpaid"]
+
+        slots_by_date = {}
+        for s in slots:
+            d = s.get("Date")
+            slots_by_date.setdefault(d, []).append(s.get("Time"))
+
         context = f"""
 === FixPro iPhone Repair — Live Data (as of {today}) ===
 
@@ -340,7 +391,7 @@ UNPAID BOOKINGS ({len(unpaid)} total):
 {chr(10).join([f"- {b.get('Date')} | {b.get('Name')} | {b.get('Phone')} | {b.get('Device')}" for b in unpaid[:10]]) or "None"}
 
 SLOT AVAILABILITY:
-{chr(10).join([f"- {s.get('Date')}: {s.get('available')} available, {s.get('booked')} booked" for s in slots]) or "No slot data"}
+{chr(10).join([f"- {d}: {len(times)} slots available ({', '.join(times)})" for d, times in list(slots_by_date.items())[:10]]) or "No slots available"}
 
 LEADS ({len(leads)} total, last 10):
 {chr(10).join([f"- {l.get('Name')} | {l.get('Phone')} | {l.get('Device')} | {l.get('Issue')}" for l in leads[:10]]) or "None"}
@@ -357,7 +408,6 @@ def owner_chat(req: OwnerChatRequest, user=Depends(verify_token)):
     try:
         if req.context:
             bookings = req.context.get("bookings", [])
-            slots = req.context.get("slots", [])
             leads = req.context.get("leads", [])
             revenue = req.context.get("revenue", 0)
             today = str(date.today())
@@ -368,9 +418,6 @@ BOOKINGS ({len(bookings)} total):
 {chr(10).join([f"- {b.get('Date')} {b.get('Time')} | {b.get('Name')} | {b.get('Phone')} | {b.get('Device')} | {b.get('Service')} | {b.get('Status')} | {b.get('Payment Status')}" for b in bookings[:30]]) or "None"}
 
 REVENUE (confirmed bookings): Rs{revenue:,}
-
-SLOTS:
-{chr(10).join([f"- {s.get('Date')}: {s.get('available')} available, {s.get('booked')} booked" for s in slots]) or "No slot data"}
 
 LEADS ({len(leads)} total):
 {chr(10).join([f"- {l.get('Name')} | {l.get('Phone')} | {l.get('Device')} | {l.get('Issue')}" for l in leads[:10]]) or "None"}
@@ -408,14 +455,12 @@ def customer_chat(req: CustomerChatRequest):
         session = get_session(session_id)
         msg = req.message.strip()
 
-        # ── Spam filter ──────────────────────────────────────────────────────
         if is_spam(msg):
             return respond(
                 "Please keep the conversation respectful 😊 How can I help you book a repair?",
                 session_id
             )
 
-        # ── Language lock ─────────────────────────────────────────────────────
         if not session["language"]:
             session["language"] = detect_language(msg)
         lang = session["language"]
@@ -424,7 +469,6 @@ def customer_chat(req: CustomerChatRequest):
         collected = session["collected"]
         mode = session.get("mode")
 
-        # ── Global: exit intent (not during confirm steps) ────────────────────
         if is_exit(msg) and step not in ["confirm", "confirm_cancel", "confirm_reschedule"]:
             save_lead(collected)
             reset_session(session_id)
@@ -435,7 +479,6 @@ def customer_chat(req: CustomerChatRequest):
                 session_id, session_reset=True
             )
 
-        # ── Global: reschedule intent (any step) ──────────────────────────────
         if is_reschedule(msg) and step not in ["get_reschedule_phone", "get_new_date", "get_new_time", "confirm_reschedule"]:
             session["mode"] = "reschedule"
             session["step"] = "get_reschedule_phone"
@@ -447,7 +490,6 @@ def customer_chat(req: CustomerChatRequest):
                 session_id
             )
 
-        # ── Global: cancel booking intent (any step) ──────────────────────────
         if is_cancel_booking(msg) and step not in ["get_cancel_phone", "confirm_cancel"]:
             session["mode"] = "cancel"
             session["step"] = "get_cancel_phone"
@@ -551,9 +593,9 @@ def customer_chat(req: CustomerChatRequest):
             collected["phone"] = formatted
             session["step"] = "get_new_date"
 
-            available_slots = get_available_slots()
-            slot_btns = build_slot_buttons(available_slots)
-            slots_text = "\n".join([f"• {s.get('Date')}" for s in available_slots[:7]]) or "Please call us"
+            available_dates = get_available_dates()
+            slot_btns = build_slot_buttons(available_dates)
+            slots_text = "\n".join([f"• {d}" for d in available_dates[:7]]) or "Please call us"
 
             return respond(
                 r(f"Found your booking on {booking.get('Date')} at {booking.get('Time')}.\n\n"
@@ -567,8 +609,7 @@ def customer_chat(req: CustomerChatRequest):
         if step == "get_new_date":
             parsed = parse_date(msg)
             if not parsed:
-                available_slots = get_available_slots()
-                slot_btns = build_slot_buttons(available_slots)
+                slot_btns = build_slot_buttons(get_available_dates())
                 return respond(
                     r("Couldn't understand that date. Please pick from the available dates or say 'tomorrow', 'Saturday' etc.",
                       "Date samajh nahi aayi. Available dates mein se chunein ya 'kal', 'Saturday' bolein.",
@@ -578,8 +619,7 @@ def customer_chat(req: CustomerChatRequest):
             if parsed < str(date.today()):
                 return respond(r("That date has passed! Choose a future date.", "Yeh date guzar gayi! Aagay ki date lo.", "یہ تاریخ گزر گئی!", lang), session_id)
             if not is_slot_available(parsed):
-                available_slots = get_available_slots()
-                slot_btns = build_slot_buttons(available_slots)
+                slot_btns = build_slot_buttons(get_available_dates())
                 return respond(
                     r(f"Sorry, {parsed} is fully booked! Please choose another date.",
                       f"Sorry, {parsed} full hai! Koi aur date lo.",
@@ -588,21 +628,32 @@ def customer_chat(req: CustomerChatRequest):
                 )
             collected["new_date"] = parsed
             session["step"] = "get_new_time"
+            times = get_available_times(parsed)
+            time_btns = build_time_buttons(times) or TIME_SLOTS
             return respond(
                 r(f"✅ {parsed} works!\n\nWhat time would you prefer? (Our hours: 10 AM – 8 PM)",
                   f"✅ {parsed} theek hai!\n\nKaun sa waqt chahiye? (10 AM – 8 PM)",
                   f"✅ {parsed} ٹھیک ہے!\n\nکیا وقت مناسب ہے؟ (10 بجے – 8 بجے)", lang),
-                session_id, time_buttons=TIME_SLOTS
+                session_id, time_buttons=time_btns
             )
 
         if step == "get_new_time":
             parsed_time = parse_time(msg)
             if not parsed_time:
+                times = get_available_times(collected.get("new_date", ""))
                 return respond(
                     r("Please give a valid time between 10 AM and 8 PM (e.g. '2 PM', '4:30 PM')",
                       "10 AM se 8 PM ke beech ka waqt dijiye",
                       "10 بجے سے 8 بجے کے درمیان وقت دیں", lang),
-                    session_id, time_buttons=TIME_SLOTS
+                    session_id, time_buttons=build_time_buttons(times) or TIME_SLOTS
+                )
+            if not is_slot_available(collected.get("new_date", ""), parsed_time):
+                times = get_available_times(collected.get("new_date", ""))
+                return respond(
+                    r("Sorry, that time just got booked! Please pick another time.",
+                      "Sorry, yeh waqt abhi book ho gaya! Doosra waqt chunein.",
+                      "معذرت، یہ وقت ابھی بک ہو گیا!", lang),
+                    session_id, time_buttons=build_time_buttons(times) or TIME_SLOTS
                 )
             collected["new_time"] = parsed_time
             session["step"] = "confirm_reschedule"
@@ -626,12 +677,15 @@ def customer_chat(req: CustomerChatRequest):
         if step == "confirm_reschedule":
             if msg.lower() in ['yes', 'y', 'haan', 'confirm', 'yes, reschedule']:
                 booking = collected.get("booking_to_reschedule", {})
+                old_booking_id = booking.get("Booking ID", "")
                 try:
+                    free_slot_by_booking_id(old_booking_id)
+                    book_slot(collected["new_date"], collected["new_time"], collected.get("phone", ""), old_booking_id)
                     supabase.table("bookings").update({
                         "Date": collected["new_date"],
                         "Time": collected["new_time"],
                         "Status": "Pending",
-                    }).eq("Booking ID", booking.get("Booking ID", "")).execute()
+                    }).eq("Booking ID", old_booking_id).execute()
                 except Exception as e:
                     return respond(r("Sorry, reschedule failed. Please call us at +92 300 1234567.",
                                     "Sorry, reschedule nahi ho saka. +92 300 1234567 pe call karein.",
@@ -656,8 +710,8 @@ def customer_chat(req: CustomerChatRequest):
         # IDLE — classify intent
         # ════════════════════════════════════════════════════════════════════
         if step == "idle":
-            available_slots = get_available_slots()
-            slots_text = "\n".join([f"- {s.get('Date')}: {s.get('available')} slots" for s in available_slots]) or "Call us for availability"
+            available_dates = get_available_dates()
+            slots_text = "\n".join([f"- {d}" for d in available_dates[:7]]) or "Call us for availability"
 
             classify_prompt = f"""Classify this message as BOOKING or QUESTION.
 BOOKING = user wants to book/schedule a repair
@@ -682,7 +736,6 @@ Message: {msg}"""
                     "بہت اچھا! بکنگ میں مدد کروں گا۔ 🔧\n\nکون سا ڈیوائس ہے اور کیا مسئلہ ہے؟", lang
                 )
             else:
-                # Answer via RAG
                 system_prompt = f"""You are a helpful assistant for FixPro iPhone Repair in Lahore, Pakistan.
 Answer the customer's question using the shop info below. Be helpful, concise, and friendly.
 Reply in the same language as the customer (English, Roman Urdu, or Urdu).
@@ -690,7 +743,7 @@ Keep response under 120 words. End by asking if they'd like to book an appointme
 
 {SHOP_RAG}
 
-AVAILABLE SLOTS:
+AVAILABLE DATES:
 {slots_text}"""
                 history_msgs = [{"role": "system", "content": system_prompt}]
                 history_msgs += session["history"][-6:]
@@ -699,7 +752,7 @@ AVAILABLE SLOTS:
 
             session["history"].append({"role": "assistant", "content": reply})
             return respond(reply, session_id,
-                quick_replies=["Book a Repair", "Check Prices", "Shop Hours", "Reschedule", "Cancel Booking"] if step == "idle" and not session["history"] else []
+                quick_replies=["Book a Repair", "Check Prices", "Shop Hours", "Reschedule", "Cancel Booking"] if len(session["history"]) <= 2 else []
             )
 
         # ════════════════════════════════════════════════════════════════════
@@ -719,9 +772,9 @@ AVAILABLE SLOTS:
             wait_time = get_wait_time(collected["issue"])
 
             session["step"] = "get_date"
-            available_slots = get_available_slots()
-            slot_btns = build_slot_buttons(available_slots)
-            slots_text = "\n".join([f"• {s.get('Date')}" for s in available_slots[:7]]) or "Please call us"
+            available_dates = get_available_dates()
+            slot_btns = build_slot_buttons(available_dates)
+            slots_text = "\n".join([f"• {d}" for d in available_dates[:7]]) or "Please call us"
 
             reply = r(
                 f"Got it! **{collected['device']}** — {collected['issue']}.\n⏱ Estimated repair time: {wait_time}\n\nAvailable dates:\n{slots_text}\n\nWhich date works? (or say 'tomorrow', 'Saturday' etc.)",
@@ -737,8 +790,7 @@ AVAILABLE SLOTS:
         elif step == "get_date":
             parsed = parse_date(msg)
             if not parsed:
-                available_slots = get_available_slots()
-                slot_btns = build_slot_buttons(available_slots)
+                slot_btns = build_slot_buttons(get_available_dates())
                 return respond(
                     r("Couldn't understand that date. Pick from above or say 'tomorrow', 'Saturday', etc.",
                       "Date samajh nahi aayi. 'Kal', 'Saturday' ya upar se chunein.",
@@ -748,8 +800,7 @@ AVAILABLE SLOTS:
             if parsed < str(date.today()):
                 return respond(r("That date has passed! Please choose a future date.", "Yeh date guzar gayi! Aagay ki date lo.", "یہ تاریخ گزر گئی!", lang), session_id)
             if not is_slot_available(parsed):
-                available_slots = get_available_slots()
-                slot_btns = build_slot_buttons(available_slots)
+                slot_btns = build_slot_buttons(get_available_dates())
                 return respond(
                     r(f"Sorry, {parsed} is fully booked! Please choose another date.",
                       f"Sorry, {parsed} full hai! Koi aur date lo.",
@@ -758,13 +809,15 @@ AVAILABLE SLOTS:
                 )
             collected["date"] = parsed
             session["step"] = "get_time"
+            times = get_available_times(parsed)
+            time_btns = build_time_buttons(times) or TIME_SLOTS
             reply = r(
                 f"✅ {parsed} works!\n\nWhat time do you prefer? Our hours: 10 AM – 8 PM",
                 f"✅ {parsed} theek hai!\n\nKaun sa waqt chahiye? Hum 10 AM – 8 PM tak khule hain.",
                 f"✅ {parsed} ٹھیک ہے!\n\nکیا وقت مناسب ہے؟ ہم 10 بجے سے 8 بجے تک کھلے ہیں۔", lang
             )
             session["history"].append({"role": "assistant", "content": reply})
-            return respond(reply, session_id, time_buttons=TIME_SLOTS)
+            return respond(reply, session_id, time_buttons=time_btns)
 
         # ════════════════════════════════════════════════════════════════════
         # GET TIME
@@ -772,11 +825,20 @@ AVAILABLE SLOTS:
         elif step == "get_time":
             parsed_time = parse_time(msg)
             if not parsed_time:
+                times = get_available_times(collected.get("date", ""))
                 return respond(
                     r("Please give a valid time between 10 AM and 8 PM (e.g. '2 PM', '4:30 PM')",
                       "10 AM se 8 PM ke beech waqt dijiye",
                       "10 بجے سے 8 بجے کے درمیان وقت دیں", lang),
-                    session_id, time_buttons=TIME_SLOTS
+                    session_id, time_buttons=build_time_buttons(times) or TIME_SLOTS
+                )
+            if not is_slot_available(collected.get("date", ""), parsed_time):
+                times = get_available_times(collected.get("date", ""))
+                return respond(
+                    r("Sorry, that time just got booked! Please pick another time.",
+                      "Sorry, yeh waqt abhi book ho gaya! Doosra waqt chunein.",
+                      "معذرت، یہ وقت ابھی بک ہو گیا!", lang),
+                    session_id, time_buttons=build_time_buttons(times) or TIME_SLOTS
                 )
             collected["time"] = parsed_time
             session["step"] = "get_name"
@@ -814,8 +876,7 @@ AVAILABLE SLOTS:
                 )
             if has_duplicate_booking(formatted, collected.get("date", "")):
                 session["step"] = "get_date"
-                available_slots = get_available_slots()
-                slot_btns = build_slot_buttons(available_slots)
+                slot_btns = build_slot_buttons(get_available_dates())
                 return respond(
                     r(f"You already have a booking on {collected.get('date')}! Please choose a different date.",
                       f"Aapki {collected.get('date')} ko pehle se booking hai! Aur date lo.",
@@ -890,10 +951,9 @@ AVAILABLE SLOTS:
         # ════════════════════════════════════════════════════════════════════
         elif step == "confirm":
             if msg.lower().strip() in ['yes', 'y', 'haan', 'ha', 'confirm', 'ok', 'okay', 'theek hai', 'theek', 'ji', 'yes ✅']:
-                if not is_slot_available(collected.get("date", "")):
+                if not is_slot_available(collected.get("date", ""), collected.get("time", "")):
                     session["step"] = "get_date"
-                    available_slots = get_available_slots()
-                    slot_btns = build_slot_buttons(available_slots)
+                    slot_btns = build_slot_buttons(get_available_dates())
                     return respond(
                         r("Sorry! That slot just got filled. Please choose another date.",
                           "Sorry! Slot abhi full ho gaya. Koi aur date lo.",
@@ -916,6 +976,7 @@ AVAILABLE SLOTS:
                         "Payment Status": "Unpaid",
                         "Notes": "Booked via customer chatbot",
                     }).execute()
+                    book_slot(collected.get("date", ""), collected.get("time", ""), collected.get("phone", ""), booking_id)
                 except Exception as e:
                     raise HTTPException(status_code=500, detail=f"Booking failed: {str(e)}")
 
