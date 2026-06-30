@@ -14,8 +14,7 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 groq_client = Groq(api_key=GROQ_API_KEY)
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
-# ── In-memory session store ────────────────────────────────────────────────────
-sessions: Dict[str, dict] = {}
+# ── Session cache is defined later near the persistent session functions ──────
 
 # ══════════════════════════════════════════════════════════════════════════════
 # RAG — Shop Knowledge Base (FixPro iPhone Repair, Lahore)
@@ -425,25 +424,57 @@ def cancel_booking_by_id(booking_id: str):
     except: pass
 
 # ── Session manager ────────────────────────────────────────────────────────────
+# ── Persistent session manager (Supabase-backed) ───────────────────────────────
+# Replaces the in-memory dict so sessions survive Railway redeploys/restarts.
+# In-process cache avoids hitting Supabase on every single field read within
+# one request — we still load fresh at the start of each request and save
+# once at the end.
+_session_cache: Dict[str, dict] = {}
+
 def get_session(session_id: str) -> dict:
-    if session_id not in sessions:
-        sessions[session_id] = {
-            "step": "idle",
-            "language": None,
-            "collected": {},
-            "history": [],
-            "mode": None,
-        }
-    return sessions[session_id]
+    if session_id in _session_cache:
+        return _session_cache[session_id]
+    try:
+        res = supabase.table("chat_sessions").select("*").eq("session_id", session_id).execute()
+        if res.data:
+            row = res.data[0]
+            session = {
+                "step": row.get("step") or "idle",
+                "language": row.get("language"),
+                "mode": row.get("mode"),
+                "collected": row.get("collected") or {},
+                "history": row.get("history") or [],
+            }
+        else:
+            session = {"step": "idle", "language": None, "mode": None, "collected": {}, "history": []}
+    except Exception:
+        # Supabase unreachable — fall back to a fresh in-memory session rather than crashing
+        session = {"step": "idle", "language": None, "mode": None, "collected": {}, "history": []}
+    _session_cache[session_id] = session
+    return session
+
+def save_session(session_id: str, session: dict):
+    _session_cache[session_id] = session
+    try:
+        supabase.table("chat_sessions").upsert({
+            "session_id": session_id,
+            "step": session.get("step", "idle"),
+            "language": session.get("language"),
+            "mode": session.get("mode"),
+            "collected": session.get("collected", {}),
+            "history": session.get("history", [])[-20:],  # cap history size stored
+            "updated_at": datetime.utcnow().isoformat(),
+        }).execute()
+    except Exception:
+        pass  # don't break the chat response if persistence fails — cache still has it for this process
 
 def reset_session(session_id: str):
-    sessions[session_id] = {
-        "step": "idle",
-        "language": None,
-        "collected": {},
-        "history": [],
-        "mode": None,
-    }
+    fresh = {"step": "idle", "language": None, "mode": None, "collected": {}, "history": []}
+    _session_cache[session_id] = fresh
+    try:
+        supabase.table("chat_sessions").delete().eq("session_id", session_id).execute()
+    except Exception:
+        pass
 
 # ── Save lead on exit ──────────────────────────────────────────────────────────
 def save_lead(collected: dict):
@@ -547,9 +578,21 @@ RULES:
 # ══════════════════════════════════════════════════════════════════════════════
 @router.post("/customer")
 def customer_chat(req: CustomerChatRequest):
+    session_id = req.session_id or str(uuid.uuid4())
+    session = get_session(session_id)
     try:
-        session_id = req.session_id or str(uuid.uuid4())
-        session = get_session(session_id)
+        result = _handle_customer_message(req, session_id, session)
+        save_session(session_id, session)
+        return result
+    except HTTPException:
+        save_session(session_id, session)
+        raise
+    except Exception as e:
+        save_session(session_id, session)
+        return respond("Sorry, something went wrong. Please try again.", session_id, typing_delay_ms=0)
+
+
+def _handle_customer_message(req: CustomerChatRequest, session_id: str, session: dict):
         msg = req.message.strip()
 
         if is_spam(msg):
@@ -1176,8 +1219,3 @@ AVAILABLE DATES:
             session_id,
             quick_replies=["Book a Repair", "Check Prices", "Shop Hours", "Reschedule", "Cancel Booking"]
         )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        return respond("Sorry, something went wrong. Please try again.", req.session_id or "", typing_delay_ms=0)
