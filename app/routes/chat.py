@@ -135,10 +135,14 @@ SPAM_PATTERNS = [
     r'\b(fuck|shit|bastard|asshole|bitch|harami|gandu|madarchod|benchod)\b',
 ]
 def is_spam(text: str) -> bool:
-    t = text.lower()
+    t = text.strip().lower()
     for p in SPAM_PATTERNS:
         if re.search(p, t): return True
     if len(text) > 500: return True
+    # Never flag plausible dates/times/phone numbers as symbol-spam
+    if re.match(r'^\d{4}-\d{2}-\d{2}$', t): return False
+    if re.match(r'^\d{1,2}:\d{2}\s*(am|pm)?$', t): return False
+    if re.match(r'^[\d\s+\-()]{7,}$', t): return False
     if re.match(r'^[^a-zA-Z\u0600-\u06FF\s]{10,}$', text): return True
     return False
 
@@ -175,12 +179,15 @@ def detect_language(text: str) -> str:
     if sum(1 for w in words if w in roman_urdu) >= 2: return 'roman_urdu'
     return 'english'
 
-# ── Smart date parser ──────────────────────────────────────────────────────────
+import re as _re
+from difflib import get_close_matches
+
+# ── Smart date parser (with typo tolerance) ────────────────────────────────────
 def parse_date(text: str) -> Optional[str]:
     text = text.lower().strip()
     today = date.today()
     if any(w in text for w in ['today', 'aaj', 'aj']): return str(today)
-    if any(w in text for w in ['tomorrow', 'kal', 'kl']): return str(today + timedelta(days=1))
+    if any(w in text for w in ['tomorrow', 'tommorow', 'tomorow', 'tomarrow', 'kal', 'kl']): return str(today + timedelta(days=1))
     if any(w in text for w in ['day after tomorrow', 'parso', 'parsoon']): return str(today + timedelta(days=2))
     days = {
         'monday': 0, 'somwar': 0,
@@ -191,8 +198,19 @@ def parse_date(text: str) -> Optional[str]:
         'saturday': 5, 'hafta': 5,
         'sunday': 6, 'itwar': 6,
     }
+    # Exact substring match first
     for day_name, day_num in days.items():
         if day_name in text:
+            days_ahead = day_num - today.weekday()
+            if days_ahead <= 0: days_ahead += 7
+            return str(today + timedelta(days=days_ahead))
+    # Fuzzy match each word against day names to catch typos (fruday, satrday, etc.)
+    words = re.findall(r'[a-z]+', text)
+    for word in words:
+        if len(word) < 4: continue
+        match = get_close_matches(word, days.keys(), n=1, cutoff=0.72)
+        if match:
+            day_num = days[match[0]]
             days_ahead = day_num - today.weekday()
             if days_ahead <= 0: days_ahead += 7
             return str(today + timedelta(days=days_ahead))
@@ -205,6 +223,61 @@ def parse_date(text: str) -> Optional[str]:
                 if d >= today: return str(d)
             except: pass
     return None
+
+# ── Fuzzy yes/no/skip detection (typo tolerant) ────────────────────────────────
+YES_WORDS = ['yes', 'y', 'haan', 'ha', 'confirm', 'ok', 'okay', 'theek hai', 'theek', 'ji', 'yes ✅', 'sure', 'yep', 'yeah']
+NO_WORDS = ['no', 'n', 'nahi', 'cancel', 'nope', 'no ❌', 'nah']
+SKIP_WORDS = ['skip', 'no', 'nahi', 'nope', "don't have", 'dont have', 'na', 'none']
+
+def fuzzy_match_word(msg: str, word_list: list, cutoff: float = 0.75) -> bool:
+    t = msg.lower().strip()
+    if t in word_list: return True
+    for w in word_list:
+        if len(w) < 3: continue
+        if get_close_matches(t, [w], n=1, cutoff=cutoff): return True
+    return False
+
+def is_yes(msg: str) -> bool: return fuzzy_match_word(msg, YES_WORDS)
+def is_no(msg: str) -> bool: return fuzzy_match_word(msg, NO_WORDS)
+def is_skip(msg: str) -> bool: return fuzzy_match_word(msg, SKIP_WORDS)
+
+# ── Detect off-track questions during data collection ──────────────────────────
+QUESTION_TRIGGERS = ['?', 'how much', 'price', 'cost', 'hours', 'open', 'close',
+                     'location', 'where', 'address', 'warranty', 'kitna', 'kahan',
+                     'kab', 'kya hai', 'timing', 'kitne']
+
+def looks_like_question(msg: str, expected_step: str) -> bool:
+    """Returns True if the message looks like an off-topic question rather than
+    a plausible answer to the current collection step."""
+    t = msg.lower().strip()
+    # Plausible answers to specific steps should never be treated as questions
+    if expected_step == "get_phone" and re.search(r'\d{7,}', t): return False
+    if expected_step == "get_email" and ('@' in t or is_skip(t)): return False
+    if expected_step == "get_name" and len(t.split()) <= 4 and not any(q in t for q in QUESTION_TRIGGERS): return False
+    if expected_step in ("get_date", "get_new_date") and (parse_date(t) or any(d in t for d in
+        ['monday','tuesday','wednesday','thursday','friday','saturday','sunday','tomorrow','today'])): return False
+    if expected_step in ("get_time", "get_new_time") and re.search(r'\d{1,2}(:\d{2})?\s*(am|pm)?', t): return False
+    return any(q in t for q in QUESTION_TRIGGERS)
+
+def answer_offtrack_question(msg: str, lang: str, history: list) -> str:
+    """Quick RAG answer for a question asked mid-flow, kept short."""
+    system_prompt = f"""You are a helpful assistant for FixPro iPhone Repair in Lahore.
+Answer the customer's question briefly using the shop info below (max 60 words).
+Reply in the same language as the customer (English, Roman Urdu, or Urdu).
+Do NOT ask if they want to book — they're already mid-booking, just answer and we'll re-ask the booking question after.
+
+{SHOP_RAG}"""
+    try:
+        res = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": msg}],
+            max_tokens=150, temperature=0.4,
+        )
+        return res.choices[0].message.content
+    except Exception:
+        return r("I'll answer that in a moment — let's finish your booking first.",
+                  "Iska jawab thori dair mein dunga — pehle booking complete kar lein.",
+                  "اس کا جواب جلد دوں گا — پہلے بکنگ مکمل کر لیں۔", lang)
 
 # ── Phone formatter ────────────────────────────────────────────────────────────
 def format_phone(phone: str) -> Optional[str]:
@@ -309,17 +382,21 @@ def has_duplicate_booking(phone: str, booking_date: str) -> bool:
     except: return False
 
 # ── Find booking by phone ──────────────────────────────────────────────────────
-def find_booking_by_phone(phone: str) -> Optional[dict]:
+def find_bookings_by_phone(phone: str) -> list:
     try:
         today = str(date.today())
         res = supabase.table("bookings").select("*")\
             .eq("Phone", phone)\
             .gte("Date", today)\
+            .neq("Status", "Cancelled")\
             .order("Date")\
-            .limit(1)\
             .execute()
-        return res.data[0] if res.data else None
-    except: return None
+        return res.data or []
+    except: return []
+
+def find_booking_by_phone(phone: str) -> Optional[dict]:
+    bookings = find_bookings_by_phone(phone)
+    return bookings[0] if bookings else None
 
 def cancel_booking_by_id(booking_id: str):
     try:
@@ -503,6 +580,41 @@ def customer_chat(req: CustomerChatRequest):
 
         session["history"].append({"role": "user", "content": msg})
 
+        # ── Mid-flow question interception ─────────────────────────────────────
+        # If user asks an unrelated question while we're collecting booking info,
+        # answer it via RAG, then re-ask the SAME field instead of breaking the flow.
+        DATA_COLLECTION_STEPS = ["get_device", "get_date", "get_time", "get_name",
+                                  "get_phone", "get_email", "get_new_date", "get_new_time"]
+        REPROMPT_TEXT = {
+            "get_device": r("Now, what device do you have and what's the issue?",
+                             "Ab batayein, kaun sa device hai aur kya masla hai?",
+                             "اب بتائیں، کون سا ڈیوائس ہے اور کیا مسئلہ ہے؟", lang),
+            "get_date": r("Which date works for your appointment?",
+                          "Appointment ke liye kaun si date theek hai?",
+                          "ملاقات کے لیے کون سی تاریخ مناسب ہے؟", lang),
+            "get_time": r("What time would you prefer?",
+                         "Kaun sa waqt chahiye?",
+                         "کیا وقت مناسب ہے؟", lang),
+            "get_name": r("What's your full name?", "Aapka poora naam?", "آپ کا پورا نام؟", lang),
+            "get_phone": r("What's your phone number?", "Phone number?", "فون نمبر؟", lang),
+            "get_email": r("What's your email? (or type 'skip')", "Email? (ya 'skip' likhein)", "ای میل؟ (یا 'skip' لکھیں)", lang),
+            "get_new_date": r("Which new date would you like?", "Nayi date batayein?", "نئی تاریخ بتائیں؟", lang),
+            "get_new_time": r("What new time would you prefer?", "Naya waqt batayein?", "نیا وقت بتائیں؟", lang),
+        }
+        if step in DATA_COLLECTION_STEPS and looks_like_question(msg, step):
+            answer = answer_offtrack_question(msg, lang, session["history"])
+            reprompt = REPROMPT_TEXT.get(step, "")
+            combined = f"{answer}\n\n{reprompt}"
+            session["history"].append({"role": "assistant", "content": combined})
+            # Re-show relevant buttons if applicable
+            if step in ("get_date", "get_new_date"):
+                return respond(combined, session_id, slot_buttons=build_slot_buttons(get_available_dates()))
+            if step in ("get_time", "get_new_time"):
+                d = collected.get("date") or collected.get("new_date") or ""
+                times = get_available_times(d)
+                return respond(combined, session_id, time_buttons=build_time_buttons(times) or TIME_SLOTS)
+            return respond(combined, session_id)
+
         # ════════════════════════════════════════════════════════════════════
         # CANCEL FLOW
         # ════════════════════════════════════════════════════════════════════
@@ -515,8 +627,8 @@ def customer_chat(req: CustomerChatRequest):
                       "درست فون نمبر درج کریں", lang),
                     session_id
                 )
-            booking = find_booking_by_phone(formatted)
-            if not booking:
+            bookings = find_bookings_by_phone(formatted)
+            if not bookings:
                 reset_session(session_id)
                 return respond(
                     r("No upcoming booking found for that number. Please check and try again, or call us at +92 300 1234567.",
@@ -524,6 +636,12 @@ def customer_chat(req: CustomerChatRequest):
                       "اس نمبر پر کوئی آنے والی بکنگ نہیں ملی۔", lang),
                     session_id, session_reset=True
                 )
+            booking = bookings[0]
+            note = ""
+            if len(bookings) > 1:
+                note = r(f"\n\n(You have {len(bookings)} upcoming bookings — showing the earliest. Call us if you meant a different one.)",
+                         f"\n\n(Aapki {len(bookings)} bookings hain — sab se pehli dikha rahe hain.)",
+                         f"\n\n({len(bookings)} بکنگز ہیں — پہلی دکھا رہے ہیں۔)", lang)
             collected["booking_to_cancel"] = booking
             collected["phone"] = formatted
             session["step"] = "confirm_cancel"
@@ -533,22 +651,22 @@ def customer_chat(req: CustomerChatRequest):
                   f"⏰ Time: {booking.get('Time')}\n"
                   f"📱 Device: {booking.get('Device')}\n"
                   f"🔧 Issue: {booking.get('Issue')}\n\n"
-                  f"Are you sure you want to cancel? Type YES to confirm or NO to keep it.",
+                  f"Are you sure you want to cancel? Type YES to confirm or NO to keep it.{note}",
                   f"Aapki booking mili:\n\n"
                   f"📅 Date: {booking.get('Date')}\n"
                   f"⏰ Waqt: {booking.get('Time')}\n"
                   f"📱 Device: {booking.get('Device')}\n\n"
-                  f"Kya aap wakai cancel karna chahte hain? YES ya NO likhein.",
+                  f"Kya aap wakai cancel karna chahte hain? YES ya NO likhein.{note}",
                   f"آپ کی بکنگ ملی:\n\n"
                   f"📅 تاریخ: {booking.get('Date')}\n"
                   f"⏰ وقت: {booking.get('Time')}\n\n"
-                  f"کیا آپ واقعی منسوخ کرنا چاہتے ہیں؟ YES یا NO لکھیں۔", lang),
+                  f"کیا آپ واقعی منسوخ کرنا چاہتے ہیں؟ YES یا NO لکھیں۔{note}", lang),
                 session_id,
                 quick_replies=["YES, Cancel", "NO, Keep it"]
             )
 
         if step == "confirm_cancel":
-            if msg.lower() in ['yes', 'y', 'haan', 'confirm', 'yes, cancel']:
+            if is_yes(msg):
                 booking = collected.get("booking_to_cancel", {})
                 cancel_booking_by_id(booking.get("Booking ID", ""))
                 reset_session(session_id)
@@ -580,8 +698,8 @@ def customer_chat(req: CustomerChatRequest):
                       "درست فون نمبر درج کریں", lang),
                     session_id
                 )
-            booking = find_booking_by_phone(formatted)
-            if not booking:
+            bookings = find_bookings_by_phone(formatted)
+            if not bookings:
                 reset_session(session_id)
                 return respond(
                     r("No upcoming booking found for that number. Please check and try again, or call us at +92 300 1234567.",
@@ -589,6 +707,12 @@ def customer_chat(req: CustomerChatRequest):
                       "اس نمبر پر کوئی بکنگ نہیں ملی۔", lang),
                     session_id, session_reset=True
                 )
+            booking = bookings[0]
+            note = ""
+            if len(bookings) > 1:
+                note = r(f"\n\n(You have {len(bookings)} upcoming bookings — rescheduling the earliest. Call us if you meant a different one.)",
+                         f"\n\n(Aapki {len(bookings)} bookings hain — sab se pehli reschedule kar rahe hain.)",
+                         f"\n\n({len(bookings)} بکنگز ہیں — پہلی کو دوبارہ شیڈول کر رہے ہیں۔)", lang)
             collected["booking_to_reschedule"] = booking
             collected["phone"] = formatted
             session["step"] = "get_new_date"
@@ -598,11 +722,11 @@ def customer_chat(req: CustomerChatRequest):
             slots_text = "\n".join([f"• {d}" for d in available_dates[:7]]) or "Please call us"
 
             return respond(
-                r(f"Found your booking on {booking.get('Date')} at {booking.get('Time')}.\n\n"
+                r(f"Found your booking on {booking.get('Date')} at {booking.get('Time')}.{note}\n\n"
                   f"Available dates:\n{slots_text}\n\nWhich new date would you like?",
-                  f"Aapki booking mili: {booking.get('Date')} ko {booking.get('Time')} baje.\n\n"
+                  f"Aapki booking mili: {booking.get('Date')} ko {booking.get('Time')} baje.{note}\n\n"
                   f"Available dates:\n{slots_text}\n\nNayi date batayein.",
-                  f"آپ کی بکنگ ملی۔\n\nدستیاب تاریخیں:\n{slots_text}\n\nنئی تاریخ بتائیں۔", lang),
+                  f"آپ کی بکنگ ملی۔{note}\n\nدستیاب تاریخیں:\n{slots_text}\n\nنئی تاریخ بتائیں۔", lang),
                 session_id, slot_buttons=slot_btns
             )
 
@@ -675,7 +799,7 @@ def customer_chat(req: CustomerChatRequest):
             )
 
         if step == "confirm_reschedule":
-            if msg.lower() in ['yes', 'y', 'haan', 'confirm', 'yes, reschedule']:
+            if is_yes(msg):
                 booking = collected.get("booking_to_reschedule", {})
                 old_booking_id = booking.get("Booking ID", "")
                 try:
@@ -868,6 +992,16 @@ AVAILABLE DATES:
         elif step == "get_phone":
             formatted = format_phone(msg)
             if not formatted:
+                collected["phone_retries"] = collected.get("phone_retries", 0) + 1
+                if collected["phone_retries"] >= 3:
+                    save_lead(collected)
+                    reset_session(session_id)
+                    return respond(
+                        r("Having trouble with the phone format. Please call us directly at +92 300 1234567 and we'll book you right away!",
+                          "Phone number mein masla aa raha hai. Seedha +92 300 1234567 pe call karein, hum turant book kar dein ge!",
+                          "فون نمبر میں مسئلہ ہے۔ براہ راست +92 300 1234567 پر کال کریں!", lang),
+                        session_id, session_reset=True
+                    )
                 return respond(
                     r("Invalid phone number. Please enter with country code (e.g. 03001234567)",
                       "Phone number sahi nahi. Country code ke saath dalein (03001234567)",
@@ -897,7 +1031,7 @@ AVAILABLE DATES:
         # GET EMAIL
         # ════════════════════════════════════════════════════════════════════
         elif step == "get_email":
-            if any(w in msg.lower() for w in ['skip', 'no', 'nahi', 'nope', "don't have", 'dont have']):
+            if is_skip(msg):
                 collected["email"] = ""
             elif not is_valid_email(msg):
                 return respond(
@@ -950,7 +1084,7 @@ AVAILABLE DATES:
         # CONFIRM BOOKING
         # ════════════════════════════════════════════════════════════════════
         elif step == "confirm":
-            if msg.lower().strip() in ['yes', 'y', 'haan', 'ha', 'confirm', 'ok', 'okay', 'theek hai', 'theek', 'ji', 'yes ✅']:
+            if is_yes(msg):
                 if not is_slot_available(collected.get("date", ""), collected.get("time", "")):
                     session["step"] = "get_date"
                     slot_btns = build_slot_buttons(get_available_dates())
@@ -978,7 +1112,13 @@ AVAILABLE DATES:
                     }).execute()
                     book_slot(collected.get("date", ""), collected.get("time", ""), collected.get("phone", ""), booking_id)
                 except Exception as e:
-                    raise HTTPException(status_code=500, detail=f"Booking failed: {str(e)}")
+                    save_lead(collected)
+                    return respond(
+                        r("Sorry, something went wrong saving your booking. We've noted your details — please call us at +92 300 1234567 to confirm.",
+                          "Sorry, booking save karte waqt masla aa gaya. Aapki details note kar li hain — +92 300 1234567 pe call karein confirm karne ke liye.",
+                          "معذرت، بکنگ محفوظ کرتے ہوئے مسئلہ ہوا۔ براہ کرم +92 300 1234567 پر کال کریں۔", lang),
+                        session_id
+                    )
 
                 booking_info = {**collected, "booking_id": booking_id}
                 reset_session(session_id)
@@ -993,7 +1133,7 @@ AVAILABLE DATES:
                     quick_replies=["⭐ Leave a Review", "Book Another"]
                 )
 
-            elif msg.lower().strip() in ['no', 'n', 'nahi', 'cancel', 'nope', 'no ❌']:
+            elif is_no(msg):
                 reset_session(session_id)
                 return respond(
                     r("Booking cancelled. Feel free to start again anytime! 😊",
