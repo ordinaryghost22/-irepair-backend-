@@ -298,8 +298,26 @@ SHOP_CLOSE = 20
 TIME_SLOTS = ["10:00 AM", "11:00 AM", "12:00 PM", "1:00 PM", "2:00 PM",
               "3:00 PM", "4:00 PM", "5:00 PM", "6:00 PM", "7:00 PM"]
 
+def format_time_display(time_24: str) -> str:
+    """Convert internal 24-hour 'HH:MM' to friendly '1:00 PM' for messages only."""
+    try:
+        hour, mins = map(int, time_24.split(':'))
+        display_hour = hour if hour <= 12 else hour - 12
+        if display_hour == 0: display_hour = 12
+        meridiem = "AM" if hour < 12 else "PM"
+        return f"{display_hour}:{mins:02d} {meridiem}"
+    except:
+        return time_24
+
 def parse_time(text: str) -> Optional[str]:
     text = text.lower().strip()
+    # If it's already a clean 24-hour HH:MM (e.g. from a clicked time button), use it directly
+    m24 = re.match(r'^(\d{1,2}):(\d{2})$', text)
+    if m24:
+        hour, mins = int(m24.group(1)), int(m24.group(2))
+        if SHOP_OPEN <= hour < SHOP_CLOSE:
+            return f"{hour:02d}:{mins:02d}"
+        return None
     m = re.search(r'(\d{1,2})(?::(\d{2}))?\s*(am|pm)?', text)
     if not m: return None
     hour = int(m.group(1))
@@ -309,10 +327,7 @@ def parse_time(text: str) -> Optional[str]:
     if meridiem == 'am' and hour == 12: hour = 0
     if hour >= 7 and hour < 10 and not meridiem: hour += 12
     if not (SHOP_OPEN <= hour < SHOP_CLOSE): return None
-    display_hour = hour if hour <= 12 else hour - 12
-    if display_hour == 0: display_hour = 12
-    meridiem_out = "AM" if hour < 12 else "PM"
-    return f"{display_hour}:{mins:02d} {meridiem_out}"
+    return f"{hour:02d}:{mins:02d}"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SLOT HELPERS — matches real table: id, Date, Time, Status, Booked By, Day, Phone, Booking ID
