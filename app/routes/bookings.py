@@ -86,7 +86,7 @@ def get_booking(booking_id: str, user=Depends(verify_token)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/")
-def create_booking(booking: Booking, user=Depends(verify_token)):
+def create_booking(booking: Booking):
     try:
         data = {
             "Name": booking.name,

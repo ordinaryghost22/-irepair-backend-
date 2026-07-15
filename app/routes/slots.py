@@ -13,7 +13,7 @@ class SlotUpdate(BaseModel):
     booked: Optional[int] = None
 
 @router.get("/")
-def get_slots(user=Depends(verify_token)):
+def get_slots():
     try:
         res = supabase.table("slots").select("*").order("Date").execute()
         return res.data  # plain array
