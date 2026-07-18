@@ -27,6 +27,7 @@ class Booking(BaseModel):
     payment_status: Optional[str] = "Unpaid"
     notes: Optional[str] = None
     amount: Optional[float] = None
+    source: Optional[str] = None
 
 class BookingUpdate(BaseModel):
     name: Optional[str] = None
@@ -41,6 +42,7 @@ class BookingUpdate(BaseModel):
     payment_status: Optional[str] = None
     notes: Optional[str] = None
     amount: Optional[float] = None
+    source: Optional[str] = None
 
 class StatusUpdate(BaseModel):
     Status: str
@@ -126,6 +128,8 @@ def create_booking(booking: Booking):
         }
         if booking.amount is not None:
             data["amount"] = booking.amount
+        if booking.source:
+            data["Source"] = booking.source
         res = supabase.table("bookings").insert(data).execute()
         result = res.data[0] if res.data else {}
 
@@ -171,6 +175,7 @@ def update_booking(booking_id: str, booking: BookingUpdate, user=Depends(verify_
         if booking.payment_status is not None: data["Payment Status"] = booking.payment_status
         if booking.notes is not None: data["Notes"] = booking.notes
         if booking.amount is not None: data["amount"] = booking.amount
+        if booking.source is not None: data["Source"] = booking.source
         res = supabase.table("bookings").update(data).eq("Booking ID", booking_id).execute()
         return res.data[0] if res.data else {}
     except Exception as e:
