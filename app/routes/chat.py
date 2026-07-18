@@ -587,6 +587,23 @@ LEADS ({len(leads)} total, last 10):
 # ══════════════════════════════════════════════════════════════════════════════
 # OWNER CHAT
 # ══════════════════════════════════════════════════════════════════════════════
+# ── Owner: list all chat sessions (for dashboard Chats page) ───────────────────
+@router.get("/sessions")
+def list_chat_sessions(user=Depends(verify_token), limit: int = 100):
+    """Return recent chat_sessions for the owner dashboard (read-only)."""
+    try:
+        cap = max(1, min(int(limit or 100), 200))
+        res = (
+            supabase.table("chat_sessions")
+            .select("session_id, collected, history, updated_at, booking_id")
+            .order("updated_at", desc=True)
+            .limit(cap)
+            .execute()
+        )
+        return res.data or []
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/owner")
 def owner_chat(req: OwnerChatRequest, user=Depends(verify_token)):
     try:
