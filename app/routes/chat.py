@@ -5,6 +5,8 @@ from groq import Groq
 from supabase import create_client
 from app.config import SUPABASE_URL, SUPABASE_KEY, GROQ_API_KEY
 from app.auth import verify_token
+from app.phone import normalize_phone
+from app.slot_claim import claim_slot, link_slot_booking, release_slot
 import uuid
 import re
 import time
@@ -322,14 +324,8 @@ Do NOT ask if they want to book — they're already mid-booking, just answer and
                   "Iska jawab thori dair mein dunga — pehle booking complete kar lein.",
                   "اس کا جواب جلد دوں گا — پہلے بکنگ مکمل کر لیں۔", lang)
 
-# ── Phone formatter ────────────────────────────────────────────────────────────
-def format_phone(phone: str) -> Optional[str]:
-    digits = re.sub(r'\D', '', phone)
-    if len(digits) == 11 and digits.startswith('0'): return '+92' + digits[1:]
-    if len(digits) == 12 and digits.startswith('92'): return '+' + digits
-    if len(digits) == 10: return '+92' + digits
-    if len(phone.strip()) > 0 and phone.strip()[0] == '+' and len(digits) >= 12: return '+' + digits
-    return None
+# ── Phone formatter (canonical +92XXXXXXXXXX via shared util) ──────────────────
+format_phone = normalize_phone
 
 # ── Email validator ────────────────────────────────────────────────────────────
 def is_valid_email(email: str) -> bool:
@@ -415,16 +411,27 @@ def build_time_buttons(times: list) -> list:
     return result
 
 def book_slot(booking_date: str, booking_time: str, phone: str, booking_id: str) -> bool:
-    """Marks a specific Date+Time slot as Booked and links it to the booking."""
+    """
+    Atomically claim Available slot and link booking ID (reschedule path).
+    Returns True only if the claim succeeded.
+    """
+    claimed = claim_slot(booking_date, booking_time, phone)
+    if not claimed:
+        return False
+    slot_id = claimed.get("id")
     try:
-        res = supabase.table("slots").update({
-            "Status": "Booked",
-            "Booked By": phone,
-            "Phone": phone,
-            "Booking ID": booking_id,
-        }).eq("Date", booking_date).eq("Time", booking_time).eq("Status", "Available").execute()
-        return len(res.data) > 0
-    except: return False
+        if slot_id is not None:
+            link_slot_booking(slot_id, booking_id)
+        else:
+            # Fallback if id missing from response — match by date/time
+            supabase.table("slots").update({"Booking ID": booking_id}).eq(
+                "Date", booking_date
+            ).eq("Time", booking_time).eq("Status", "Booked").execute()
+        return True
+    except Exception:
+        if slot_id is not None:
+            release_slot(slot_id)
+        return False
 
 def free_slot_by_booking_id(booking_id: str):
     """Frees up a slot when a booking is cancelled or rescheduled away from it."""
@@ -951,7 +958,19 @@ def _handle_customer_message(req: CustomerChatRequest, session_id: str, session:
                 old_booking_id = booking.get("Booking ID", "")
                 try:
                     free_slot_by_booking_id(old_booking_id)
-                    book_slot(collected["new_date"], collected["new_time"], collected.get("phone", ""), old_booking_id)
+                    claimed_ok = book_slot(
+                        collected["new_date"],
+                        collected["new_time"],
+                        collected.get("phone", ""),
+                        old_booking_id,
+                    )
+                    if not claimed_ok:
+                        return respond(
+                            r("This slot is no longer available, please choose another.",
+                              "Yeh slot ab available nahi — koi aur date/time chunein.",
+                              "یہ سلاٹ اب دستیاب نہیں۔", lang),
+                            session_id
+                        )
                     supabase.table("bookings").update({
                         "Date": collected["new_date"],
                         "Time": collected["new_time"],
@@ -1237,35 +1256,46 @@ AVAILABLE DATES:
         # ════════════════════════════════════════════════════════════════════
         elif step == "confirm":
             if is_yes(msg):
-                if not is_slot_available(collected.get("date", ""), collected.get("time", "")):
+                booking_date = collected.get("date", "")
+                booking_time = collected.get("time", "")
+                phone = collected.get("phone", "")
+                booking_id = f"CUST-{uuid.uuid4().hex[:8].upper()}"
+
+                # Claim slot FIRST — reject if another request already took it
+                claimed = claim_slot(booking_date, booking_time, phone)
+                if not claimed:
                     session["step"] = "get_date"
                     slot_btns = build_slot_buttons(get_available_dates())
                     return respond(
-                        r("Sorry! That slot just got filled. Please choose another date.",
-                          "Sorry! Slot abhi full ho gaya. Koi aur date lo.",
-                          "معذرت! سلاٹ ابھی بھر گیا۔", lang),
+                        r("This slot is no longer available, please choose another.",
+                          "Yeh slot ab available nahi — koi aur date/time chunein.",
+                          "یہ سلاٹ اب دستیاب نہیں، براہ کرم دوسرا منتخب کریں۔", lang),
                         session_id, slot_buttons=slot_btns
                     )
-                booking_id = f"CUST-{uuid.uuid4().hex[:8].upper()}"
+
+                slot_id = claimed.get("id")
                 try:
                     supabase.table("bookings").insert({
                         "Booking ID": booking_id,
                         "Name": collected.get("name", ""),
-                        "Phone": collected.get("phone", ""),
+                        "Phone": phone,
                         "Email": collected.get("email", ""),
                         "Device": collected.get("device", ""),
                         "Issue": collected.get("issue", ""),
                         "Service": collected.get("issue", ""),
-                        "Date": collected.get("date", ""),
-                        "Time": collected.get("time", ""),
+                        "Date": booking_date,
+                        "Time": booking_time,
                         "Status": "Pending",
                         "Payment Status": "Unpaid",
-                        "Notes": "Booked via customer chatbot",
+                        "Notes": "[Chatbot] Booked via customer chatbot",
                     }).execute()
-                    book_slot(collected.get("date", ""), collected.get("time", ""), collected.get("phone", ""), booking_id)
-                    logger.info(f"Booking created: {booking_id} | {collected.get('phone')} | {collected.get('date')} {collected.get('time')}")
+                    if slot_id is not None:
+                        link_slot_booking(slot_id, booking_id)
+                    logger.info(f"Booking created: {booking_id} | {phone} | {booking_date} {booking_time}")
                 except Exception as e:
-                    logger.error(f"Booking insert failed for {collected.get('phone')}: {e}")
+                    logger.error(f"Booking insert failed for {phone}: {e}")
+                    if slot_id is not None:
+                        release_slot(slot_id)
                     save_lead(collected)
                     return respond(
                         r("Sorry, something went wrong saving your booking. We've noted your details — please call us at +92 300 1234567 to confirm.",

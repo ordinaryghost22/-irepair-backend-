@@ -2,9 +2,12 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
+import uuid
 from supabase import create_client
 from app.config import SUPABASE_URL, SUPABASE_KEY
 from app.auth import verify_token
+from app.phone import normalize_phone
+from app.slot_claim import claim_slot, link_slot_booking, release_slot, SLOT_UNAVAILABLE_MSG
 from app.routes.reminders import send_booking_confirmation, schedule_reminder
 
 router = APIRouter()
@@ -113,9 +116,42 @@ def get_booking(booking_id: str, user=Depends(verify_token)):
 @router.post("/")
 def create_booking(booking: Booking):
     try:
+        phone = normalize_phone(booking.phone)
+        if not phone:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid phone number. Use format 03001234567 or +923001234567",
+            )
+        # Same duplicate guard as chatbot: one booking per phone+date
+        try:
+            dup = (
+                supabase.table("bookings")
+                .select("Booking ID")
+                .eq("Phone", phone)
+                .eq("Date", booking.date)
+                .execute()
+            )
+            if dup.data:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"A booking already exists for this phone on {booking.date}",
+                )
+        except HTTPException:
+            raise
+        except Exception as dup_err:
+            print(f"Duplicate check failed (continuing): {dup_err}")
+
+        # Claim slot FIRST (atomic WHERE Status=Available). Reject if 0 rows.
+        claimed = claim_slot(booking.date, booking.time, phone)
+        if not claimed:
+            raise HTTPException(status_code=409, detail=SLOT_UNAVAILABLE_MSG)
+
+        slot_id = claimed.get("id")
+        booking_id = f"CUST-{uuid.uuid4().hex[:8].upper()}"
         data = {
+            "Booking ID": booking_id,
             "Name": booking.name,
-            "Phone": booking.phone,
+            "Phone": phone,
             "Email": booking.email,
             "Device": booking.device,
             "Service": booking.service,
@@ -130,8 +166,19 @@ def create_booking(booking: Booking):
             data["amount"] = booking.amount
         if booking.source:
             data["Source"] = booking.source
-        res = supabase.table("bookings").insert(data).execute()
-        result = res.data[0] if res.data else {}
+
+        try:
+            res = supabase.table("bookings").insert(data).execute()
+            result = res.data[0] if res.data else {}
+            if slot_id is not None:
+                try:
+                    link_slot_booking(slot_id, booking_id)
+                except Exception as link_err:
+                    print(f"Slot Booking ID link failed (booking still saved): {link_err}")
+        except Exception:
+            if slot_id is not None:
+                release_slot(slot_id)
+            raise
 
         # --- NEW: send confirmation + schedule reminder ---
         if booking.email:
@@ -156,6 +203,8 @@ def create_booking(booking: Booking):
         # --- END NEW ---
 
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -164,7 +213,14 @@ def update_booking(booking_id: str, booking: BookingUpdate, user=Depends(verify_
     try:
         data = {}
         if booking.name is not None: data["Name"] = booking.name
-        if booking.phone is not None: data["Phone"] = booking.phone
+        if booking.phone is not None:
+            phone = normalize_phone(booking.phone)
+            if not phone:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid phone number. Use format 03001234567 or +923001234567",
+                )
+            data["Phone"] = phone
         if booking.email is not None: data["Email"] = booking.email
         if booking.device is not None: data["Device"] = booking.device
         if booking.service is not None: data["Service"] = booking.service
@@ -178,6 +234,8 @@ def update_booking(booking_id: str, booking: BookingUpdate, user=Depends(verify_
         if booking.source is not None: data["Source"] = booking.source
         res = supabase.table("bookings").update(data).eq("Booking ID", booking_id).execute()
         return res.data[0] if res.data else {}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
