@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
-from app.routes import bookings, slots, leads, chat, auth
+from app.routes import bookings, slots, leads, chat, auth, invoices
 
 app = FastAPI(
     title="iRepair API",
@@ -25,6 +25,7 @@ app.include_router(bookings.router, prefix="/bookings", tags=["Bookings"])
 app.include_router(slots.router, prefix="/slots", tags=["Slots"])
 app.include_router(leads.router, prefix="/leads", tags=["Leads"])
 app.include_router(chat.router, prefix="/chat", tags=["Chat"])
+app.include_router(invoices.router, prefix="/invoices", tags=["Invoices"])
 
 @app.get("/")
 def root():
