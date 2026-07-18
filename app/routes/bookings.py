@@ -75,6 +75,25 @@ def get_bookings(user=Depends(verify_token)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/{booking_id}/history")
+def get_booking_history(booking_id: str, user=Depends(verify_token)):
+    """Return the chatbot conversation history linked to this booking (read-only)."""
+    try:
+        res = (
+            supabase.table("chat_sessions")
+            .select("history, updated_at, session_id")
+            .eq("booking_id", booking_id)
+            .limit(1)
+            .execute()
+        )
+        if not res.data:
+            return []
+        history = res.data[0].get("history") or []
+        # history is already chronological; no per-message timestamps stored
+        return history
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("/{booking_id}")
 def get_booking(booking_id: str, user=Depends(verify_token)):
     try:
@@ -82,6 +101,8 @@ def get_booking(booking_id: str, user=Depends(verify_token)):
         if not res.data:
             raise HTTPException(status_code=404, detail="Booking not found")
         return res.data[0]
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

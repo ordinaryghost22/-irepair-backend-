@@ -488,19 +488,20 @@ def get_session(session_id: str) -> dict:
                 "mode": row.get("mode"),
                 "collected": row.get("collected") or {},
                 "history": row.get("history") or [],
+                "booking_id": row.get("booking_id"),
             }
         else:
-            session = {"step": "idle", "language": None, "mode": None, "collected": {}, "history": []}
+            session = {"step": "idle", "language": None, "mode": None, "collected": {}, "history": [], "booking_id": None}
     except Exception:
         # Supabase unreachable — fall back to a fresh in-memory session rather than crashing
-        session = {"step": "idle", "language": None, "mode": None, "collected": {}, "history": []}
+        session = {"step": "idle", "language": None, "mode": None, "collected": {}, "history": [], "booking_id": None}
     _session_cache[session_id] = session
     return session
 
 def save_session(session_id: str, session: dict):
     _session_cache[session_id] = session
     try:
-        supabase.table("chat_sessions").upsert({
+        payload = {
             "session_id": session_id,
             "step": session.get("step", "idle"),
             "language": session.get("language"),
@@ -508,17 +509,28 @@ def save_session(session_id: str, session: dict):
             "collected": session.get("collected", {}),
             "history": session.get("history", [])[-20:],  # cap history size stored
             "updated_at": datetime.utcnow().isoformat(),
-        }).execute()
+        }
+        # Persist booking link when present (nullable column on chat_sessions)
+        if session.get("booking_id"):
+            payload["booking_id"] = session["booking_id"]
+        supabase.table("chat_sessions").upsert(payload).execute()
     except Exception:
         pass  # don't break the chat response if persistence fails — cache still has it for this process
 
 def reset_session(session_id: str):
-    fresh = {"step": "idle", "language": None, "mode": None, "collected": {}, "history": []}
+    # Reset flow state for the next turn, but keep history (+ booking_id) so
+    # owners can review the conversation after a booking is confirmed.
+    existing = _session_cache.get(session_id) or {}
+    fresh = {
+        "step": "idle",
+        "language": None,
+        "mode": None,
+        "collected": {},
+        "history": existing.get("history") or [],
+        "booking_id": existing.get("booking_id"),
+    }
     _session_cache[session_id] = fresh
-    try:
-        supabase.table("chat_sessions").delete().eq("session_id", session_id).execute()
-    except Exception:
-        pass
+    # Intentionally do NOT delete the chat_sessions row.
 
 # ── Save lead on exit ──────────────────────────────────────────────────────────
 def save_lead(collected: dict):
@@ -1246,6 +1258,7 @@ AVAILABLE DATES:
                     )
 
                 booking_info = {**collected, "booking_id": booking_id}
+                session["booking_id"] = booking_id
                 reset_session(session_id)
                 reply = r(
                     f"🎉 Booking confirmed! Your ID: **{booking_id}**\n\nSee you on {booking_info.get('date')} at {booking_info.get('time')}. Please arrive 5 mins early.\n\nWould you mind leaving us a Google review after your repair? It helps us a lot! ⭐",
