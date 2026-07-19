@@ -6,6 +6,7 @@ import uuid
 from supabase import create_client
 from app.config import SUPABASE_URL, SUPABASE_KEY
 from app.auth import verify_token
+from app.audit import log_audit_event
 from app.phone import normalize_phone
 from app.slot_claim import claim_slot, link_slot_booking, release_slot, SLOT_UNAVAILABLE_MSG
 from app.routes.reminders import send_booking_confirmation, schedule_reminder
@@ -242,23 +243,112 @@ def update_booking(booking_id: str, booking: BookingUpdate, user=Depends(verify_
 @router.put("/{booking_id}/status")
 def update_booking_status(booking_id: str, body: StatusUpdate, user=Depends(verify_token)):
     try:
-        res = supabase.table("bookings").update({"Status": body.Status}).eq("Booking ID", booking_id).execute()
-        return res.data[0] if res.data else {}
+        existing = (
+            supabase.table("bookings")
+            .select("*")
+            .eq("Booking ID", booking_id)
+            .limit(1)
+            .execute()
+        )
+        if not existing.data:
+            raise HTTPException(status_code=404, detail="Booking not found")
+        before = existing.data[0]
+
+        res = (
+            supabase.table("bookings")
+            .update({"Status": body.Status})
+            .eq("Booking ID", booking_id)
+            .execute()
+        )
+        if not res.data:
+            raise HTTPException(status_code=404, detail="Booking not found")
+
+        action = None
+        if body.Status == "Confirmed":
+            action = "confirmed"
+        elif body.Status == "Rejected":
+            action = "rejected"
+        if action:
+            log_audit_event(
+                actor=user,
+                action=action,
+                booking_id=booking_id,
+                details={
+                    "name": before.get("Name"),
+                    "from": before.get("Status"),
+                    "to": body.Status,
+                },
+            )
+        return res.data[0]
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.put("/{booking_id}/payment")
 def update_booking_payment(booking_id: str, body: PaymentUpdate, user=Depends(verify_token)):
     try:
-        res = supabase.table("bookings").update({"Payment Status": body.payment_status}).eq("Booking ID", booking_id).execute()
-        return res.data[0] if res.data else {}
+        existing = (
+            supabase.table("bookings")
+            .select("*")
+            .eq("Booking ID", booking_id)
+            .limit(1)
+            .execute()
+        )
+        if not existing.data:
+            raise HTTPException(status_code=404, detail="Booking not found")
+        before = existing.data[0]
+
+        res = (
+            supabase.table("bookings")
+            .update({"Payment Status": body.payment_status})
+            .eq("Booking ID", booking_id)
+            .execute()
+        )
+        if not res.data:
+            raise HTTPException(status_code=404, detail="Booking not found")
+
+        log_audit_event(
+            actor=user,
+            action="payment_changed",
+            booking_id=booking_id,
+            details={
+                "name": before.get("Name"),
+                "from": before.get("Payment Status"),
+                "to": body.payment_status,
+            },
+        )
+        return res.data[0]
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.delete("/{booking_id}")
 def delete_booking(booking_id: str, user=Depends(verify_token)):
     try:
+        existing = (
+            supabase.table("bookings")
+            .select("*")
+            .eq("Booking ID", booking_id)
+            .limit(1)
+            .execute()
+        )
+        before = existing.data[0] if existing.data else None
+
         supabase.table("bookings").delete().eq("Booking ID", booking_id).execute()
+
+        log_audit_event(
+            actor=user,
+            action="deleted",
+            booking_id=booking_id,
+            details={
+                "name": (before or {}).get("Name"),
+                "status": (before or {}).get("Status"),
+                "date": (before or {}).get("Date"),
+                "time": (before or {}).get("Time"),
+            },
+        )
         return {"message": "Booking deleted"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

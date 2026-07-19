@@ -13,6 +13,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_LEFT, TA_RIGHT, TA_CENTER
 from app.config import SUPABASE_URL, SUPABASE_KEY
 from app.auth import verify_token
+from app.audit import log_audit_event
 
 router = APIRouter()
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -126,7 +127,21 @@ def complete_and_invoice(booking_id: str, body: CompleteBookingBody, user=Depend
         if not inv_res.data:
             raise HTTPException(status_code=500, detail="Failed to create invoice")
 
-        return _enrich_invoice(inv_res.data[0])
+        invoice = inv_res.data[0]
+        log_audit_event(
+            actor=user,
+            action="completed_invoiced",
+            booking_id=booking_id,
+            invoice_id=invoice.get("id"),
+            details={
+                "name": booking.get("Name"),
+                "amount": amount,
+                "invoice_number": invoice.get("invoice_number"),
+                "from_status": booking.get("Status"),
+                "to_status": "Completed",
+            },
+        )
+        return _enrich_invoice(invoice)
     except HTTPException:
         raise
     except Exception as e:
@@ -149,6 +164,7 @@ def update_invoice_status(invoice_id: str, body: InvoiceStatusUpdate, user=Depen
     if status not in ("paid", "unpaid"):
         raise HTTPException(status_code=400, detail="status must be 'paid' or 'unpaid'")
     try:
+        before = _fetch_invoice(invoice_id)
         res = (
             supabase.table("invoices")
             .update({"status": status})
@@ -157,6 +173,19 @@ def update_invoice_status(invoice_id: str, body: InvoiceStatusUpdate, user=Depen
         )
         if not res.data:
             raise HTTPException(status_code=404, detail="Invoice not found")
+
+        log_audit_event(
+            actor=user,
+            action="invoice_status_changed",
+            booking_id=before.get("booking_id"),
+            invoice_id=invoice_id,
+            details={
+                "from": before.get("status"),
+                "to": status,
+                "invoice_number": before.get("invoice_number"),
+                "amount": before.get("amount"),
+            },
+        )
         return _enrich_invoice(res.data[0])
     except HTTPException:
         raise
