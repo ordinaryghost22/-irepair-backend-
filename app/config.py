@@ -11,5 +11,9 @@ ALGORITHM = os.getenv("ALGORITHM", "HS256")
 OWNER_USERNAME = os.getenv("OWNER_USERNAME")
 OWNER_PASSWORD = os.getenv("OWNER_PASSWORD")
 
+# Optional — WhatsApp Cloud API (app boots without these; sends no-op with a clear error)
+WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
+WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
+
 if not SUPABASE_URL or not SUPABASE_KEY or not GROQ_API_KEY:
     raise ValueError("Missing environment variables. Check your .env file.")

@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
-from app.routes import bookings, slots, leads, chat, auth, invoices, audit, cash_ledger
+from app.routes import bookings, slots, leads, chat, auth, invoices, audit, cash_ledger, whatsapp
 
 app = FastAPI(
     title="iRepair API",
@@ -28,6 +28,7 @@ app.include_router(chat.router, prefix="/chat", tags=["Chat"])
 app.include_router(invoices.router, prefix="/invoices", tags=["Invoices"])
 app.include_router(audit.router, prefix="/audit-events", tags=["Audit"])
 app.include_router(cash_ledger.router, prefix="/cash-ledger", tags=["Cash Ledger"])
+app.include_router(whatsapp.router, tags=["WhatsApp"])
 
 @app.get("/")
 def root():
