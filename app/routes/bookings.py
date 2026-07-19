@@ -1,13 +1,13 @@
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
-from datetime import datetime
 import uuid
 from supabase import create_client
 from app.config import SUPABASE_URL, SUPABASE_KEY
 from app.auth import verify_token
 from app.audit import log_audit_event
 from app.phone import normalize_phone
+from app.appointment_time import parse_appointment_datetime
 from app.slot_claim import claim_slot, link_slot_booking, release_slot, SLOT_UNAVAILABLE_MSG
 from app.routes.reminders import send_booking_confirmation, schedule_reminder
 
@@ -53,26 +53,6 @@ class StatusUpdate(BaseModel):
 
 class PaymentUpdate(BaseModel):
     payment_status: str
-
-
-def parse_appointment_datetime(date_str: str, time_str: str) -> Optional[datetime]:
-    """
-    Tries a handful of common date/time format combos so we don't
-    need to know the exact frontend format in advance.
-    Add more formats to this list if none of these match.
-    """
-    date_formats = ["%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y"]
-    time_formats = ["%H:%M", "%I:%M %p", "%I:%M%p"]
-
-    for d_fmt in date_formats:
-        for t_fmt in time_formats:
-            try:
-                return datetime.strptime(f"{date_str} {time_str}", f"{d_fmt} {t_fmt}")
-            except ValueError:
-                continue
-
-    print(f"Could not parse date/time: '{date_str}' '{time_str}' — skipping email reminder")
-    return None
 
 
 @router.get("/")

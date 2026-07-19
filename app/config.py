@@ -15,5 +15,9 @@ OWNER_PASSWORD = os.getenv("OWNER_PASSWORD")
 WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
 
-if not SUPABASE_URL or not SUPABASE_KEY or not GROQ_API_KEY:
-    raise ValueError("Missing environment variables. Check your .env file.")
+# Optional — set REMINDERS_ENABLED=true only after Meta templates are Approved
+REMINDERS_ENABLED = os.getenv("REMINDERS_ENABLED", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)

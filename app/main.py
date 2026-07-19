@@ -1,7 +1,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
-from app.routes import bookings, slots, leads, chat, auth, invoices, audit, cash_ledger, whatsapp
+from app.routes import bookings, slots, leads, chat, auth, invoices, audit, cash_ledger, whatsapp, integrations
+from app.config import SUPABASE_URL, SUPABASE_KEY, GROQ_API_KEY
+
+if not SUPABASE_URL or not SUPABASE_KEY or not GROQ_API_KEY:
+    raise ValueError("Missing environment variables. Check your .env file.")
 
 app = FastAPI(
     title="iRepair API",
@@ -29,6 +33,7 @@ app.include_router(invoices.router, prefix="/invoices", tags=["Invoices"])
 app.include_router(audit.router, prefix="/audit-events", tags=["Audit"])
 app.include_router(cash_ledger.router, prefix="/cash-ledger", tags=["Cash Ledger"])
 app.include_router(whatsapp.router, tags=["WhatsApp"])
+app.include_router(integrations.router, prefix="/integrations", tags=["Integrations"])
 
 @app.get("/")
 def root():
