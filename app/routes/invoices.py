@@ -14,6 +14,7 @@ from reportlab.lib.enums import TA_LEFT, TA_RIGHT, TA_CENTER
 from app.config import SUPABASE_URL, SUPABASE_KEY
 from app.auth import verify_token
 from app.audit import log_audit_event
+from app.ledger import log_repair
 
 router = APIRouter()
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -141,6 +142,28 @@ def complete_and_invoice(booking_id: str, body: CompleteBookingBody, user=Depend
                 "to_status": "Completed",
             },
         )
+        try:
+            log_repair(
+                supabase,
+                booking_id=booking_id,
+                device_model=booking.get("Device") or "Unknown",
+                issue_type=booking.get("Service") or booking.get("Issue") or "repair",
+                technician_id=str(user),
+                technician_name=str(user),
+            )
+        except Exception as ledger_err:
+            print(f"Repair ledger write failed (booking still completed): {ledger_err}")
+            log_audit_event(
+                actor=user,
+                action="ledger_write_failed",
+                booking_id=booking_id,
+                invoice_id=invoice.get("id"),
+                details={
+                    "error": str(ledger_err),
+                    "device": booking.get("Device"),
+                    "service": booking.get("Service"),
+                },
+            )
         return _enrich_invoice(invoice)
     except HTTPException:
         raise
