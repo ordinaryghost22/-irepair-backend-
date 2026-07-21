@@ -16,14 +16,21 @@ app = FastAPI(
 # Trust Railway's proxy headers so HTTPS is correctly identified
 app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 
-# Explicit allowlist — no wildcard. Credentials stay False (JWT via Authorization header).
+# Explicit allowlist — no wildcard for the dashboard API.
+# "null" covers local file:// widget testing (Downloads / open-in-browser).
+# Public chat widget must be opened from an allowed origin, or via
+# http://localhost:5173/wefix-widget.html when using the Vite app.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://irepair-dashboard.vercel.app",
-        "http://localhost:5173",  # Vite default
-        "http://localhost:5174",  # Vite alternate when 5173 is taken
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:5174",
+        "null",  # file:// HTML widget
     ],
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
