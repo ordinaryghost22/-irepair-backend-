@@ -35,3 +35,24 @@ def create_lead(lead: Lead, user=Depends(verify_token)):
         return res.data[0] if res.data else {}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/{lead_id}")
+def delete_lead(lead_id: str, user=Depends(verify_token)):
+    try:
+        existing = (
+            supabase.table("leads")
+            .select("*")
+            .eq("id", lead_id)
+            .limit(1)
+            .execute()
+        )
+        if not existing.data:
+            raise HTTPException(status_code=404, detail="Lead not found")
+
+        supabase.table("leads").delete().eq("id", lead_id).execute()
+        return {"message": "Lead deleted", "id": lead_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

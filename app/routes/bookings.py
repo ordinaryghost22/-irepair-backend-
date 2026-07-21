@@ -1,21 +1,31 @@
-from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel
-from typing import Optional
+import re
 import uuid
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, field_validator
 from supabase import create_client
-from app.config import SUPABASE_URL, SUPABASE_KEY
-from app.auth import verify_token
-from app.audit import log_audit_event
-from app.phone import normalize_phone
+
 from app.appointment_time import parse_appointment_datetime
-from app.slot_claim import claim_slot, link_slot_booking, release_slot, SLOT_UNAVAILABLE_MSG
+from app.audit import log_audit_event
+from app.auth import verify_token
+from app.config import SUPABASE_URL, SUPABASE_KEY
+from app.phone import normalize_phone
+from app.pricing import calculate_booking_amount
+from app.rate_limit import SlidingWindowRateLimiter, client_ip
 from app.routes.reminders import send_booking_confirmation, schedule_reminder
+from app.slot_claim import SLOT_UNAVAILABLE_MSG, claim_slot, link_slot_booking, release_slot
 
 router = APIRouter()
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # your business name - hardcode for now, or pull from a settings table later
 BUSINESS_NAME = "iRepair"
+
+# 5 booking creates per IP per 60s (spam protection; one real booking is fine)
+_booking_limiter = SlidingWindowRateLimiter(max_requests=5, window_seconds=60)
+
+_EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
 
 
 class Booking(BaseModel):
@@ -30,8 +40,27 @@ class Booking(BaseModel):
     status: Optional[str] = "Pending"
     payment_status: Optional[str] = "Unpaid"
     notes: Optional[str] = None
-    amount: Optional[float] = None
+    amount: Optional[float] = None  # ignored on create — server recalculates
     source: Optional[str] = None
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def validate_email(cls, v):
+        if v is None:
+            return None
+        s = str(v).strip()
+        if not s:
+            return None
+        if not _EMAIL_RE.match(s):
+            raise ValueError("Invalid email format")
+        return s
+
+    @field_validator("date", "time")
+    @classmethod
+    def non_empty_str(cls, v):
+        if v is None or not str(v).strip():
+            raise ValueError("must not be empty")
+        return str(v).strip()
 
 class BookingUpdate(BaseModel):
     name: Optional[str] = None
@@ -95,7 +124,11 @@ def get_booking(booking_id: str, user=Depends(verify_token)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/")
-def create_booking(booking: Booking):
+def create_booking(booking: Booking, request: Request):
+    _booking_limiter.check_or_raise(
+        client_ip(request),
+        detail="Too many booking requests. Please wait a moment and try again.",
+    )
     try:
         phone = normalize_phone(booking.phone)
         if not phone:
@@ -103,19 +136,30 @@ def create_booking(booking: Booking):
                 status_code=400,
                 detail="Invalid phone number. Use format 03001234567 or +923001234567",
             )
+
+        appointment_dt = parse_appointment_datetime(booking.date, booking.time)
+        if not appointment_dt:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid date/time format. Use date YYYY-MM-DD and time HH:MM (or 12h e.g. 2:00 PM).",
+            )
+        # Canonical forms for slot matching + storage
+        booking_date = appointment_dt.strftime("%Y-%m-%d")
+        booking_time = appointment_dt.strftime("%H:%M")
+
         # Same duplicate guard as chatbot: one booking per phone+date
         try:
             dup = (
                 supabase.table("bookings")
                 .select("Booking ID")
                 .eq("Phone", phone)
-                .eq("Date", booking.date)
+                .eq("Date", booking_date)
                 .execute()
             )
             if dup.data:
                 raise HTTPException(
                     status_code=409,
-                    detail=f"A booking already exists for this phone on {booking.date}",
+                    detail=f"A booking already exists for this phone on {booking_date}",
                 )
         except HTTPException:
             raise
@@ -123,9 +167,12 @@ def create_booking(booking: Booking):
             print(f"Duplicate check failed (continuing): {dup_err}")
 
         # Claim slot FIRST (atomic WHERE Status=Available). Reject if 0 rows.
-        claimed = claim_slot(booking.date, booking.time, phone)
+        claimed = claim_slot(booking_date, booking_time, phone)
         if not claimed:
             raise HTTPException(status_code=409, detail=SLOT_UNAVAILABLE_MSG)
+
+        # Never trust client amount — recalculate from tier pricing when possible
+        server_amount = calculate_booking_amount(booking.device, booking.service)
 
         slot_id = claimed.get("id")
         booking_id = f"CUST-{uuid.uuid4().hex[:8].upper()}"
@@ -137,14 +184,14 @@ def create_booking(booking: Booking):
             "Device": booking.device,
             "Service": booking.service,
             "Issue": booking.issue,
-            "Date": booking.date,
-            "Time": booking.time,
+            "Date": booking_date,
+            "Time": booking_time,
             "Status": booking.status,
             "Payment Status": booking.payment_status,
             "Notes": booking.notes,
         }
-        if booking.amount is not None:
-            data["amount"] = booking.amount
+        if server_amount is not None:
+            data["amount"] = server_amount
         if booking.source:
             data["Source"] = booking.source
 
@@ -164,20 +211,18 @@ def create_booking(booking: Booking):
         # --- NEW: send confirmation + schedule reminder ---
         if booking.email:
             try:
-                appointment_dt = parse_appointment_datetime(booking.date, booking.time)
-                if appointment_dt:
-                    send_booking_confirmation(
-                        customer_email=booking.email,
-                        business_name=BUSINESS_NAME,
-                        service=booking.service or "repair",
-                        appointment_time=appointment_dt,
-                    )
-                    schedule_reminder(
-                        customer_email=booking.email,
-                        business_name=BUSINESS_NAME,
-                        service=booking.service or "repair",
-                        appointment_time=appointment_dt,
-                    )
+                send_booking_confirmation(
+                    customer_email=booking.email,
+                    business_name=BUSINESS_NAME,
+                    service=booking.service or "repair",
+                    appointment_time=appointment_dt,
+                )
+                schedule_reminder(
+                    customer_email=booking.email,
+                    business_name=BUSINESS_NAME,
+                    service=booking.service or "repair",
+                    appointment_time=appointment_dt,
+                )
             except Exception as email_err:
                 # don't let email failures break the booking itself
                 print(f"Confirmation/reminder email failed: {email_err}")
@@ -187,6 +232,7 @@ def create_booking(booking: Booking):
     except HTTPException:
         raise
     except Exception as e:
+        # Surface Pydantic-style validation messages cleanly if raised as ValueError
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.put("/{booking_id}")

@@ -1,12 +1,13 @@
 import re
 import time
 from datetime import datetime, timezone
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel, Field
 from typing import Optional
 from supabase import create_client
 from app.auth import verify_password, hash_password, create_access_token, verify_token
 from app.config import OWNER_USERNAME, OWNER_PASSWORD, SUPABASE_URL, SUPABASE_KEY
+from app.rate_limit import SlidingWindowRateLimiter, client_ip
 
 router = APIRouter()
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -20,6 +21,9 @@ PIN_LOCKOUT_SECONDS = 15 * 60
 
 # In-memory rate limit for PIN / password unlock (per username)
 _pin_attempts: dict = {}
+
+# Login: 5 attempts per IP per 15 minutes (matches PIN lockout window)
+_login_limiter = SlidingWindowRateLimiter(max_requests=5, window_seconds=15 * 60)
 
 
 class LoginRequest(BaseModel):
@@ -96,7 +100,11 @@ def _clear_pin_attempts(username: str) -> None:
 
 
 @router.post("/login")
-def login(req: LoginRequest):
+def login(req: LoginRequest, request: Request):
+    _login_limiter.check_or_raise(
+        client_ip(request),
+        detail="Too many attempts, try again later",
+    )
     if req.username != OWNER_USERNAME:
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if not verify_password(req.password, HASHED_PASSWORD):

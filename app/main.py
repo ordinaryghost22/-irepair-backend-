@@ -16,9 +16,14 @@ app = FastAPI(
 # Trust Railway's proxy headers so HTTPS is correctly identified
 app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 
+# Explicit allowlist — no wildcard. Credentials stay False (JWT via Authorization header).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://irepair-dashboard.vercel.app",
+        "http://localhost:5173",  # Vite default
+        "http://localhost:5174",  # Vite alternate when 5173 is taken
+    ],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
