@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict
 from groq import Groq
 from supabase import create_client
-from app.config import SUPABASE_URL, SUPABASE_KEY, GROQ_API_KEY
+from app.config import SUPABASE_URL, SUPABASE_KEY, GROQ_API_KEY, BOOKING_PAGE_URL
 from app.auth import verify_token
 from app.phone import normalize_phone
 from app.slot_claim import claim_slot, link_slot_booking, release_slot
@@ -1176,18 +1176,21 @@ Message: {msg}"""
             ).strip().upper()
 
             if "BOOKING" in intent:
-                session["step"] = "get_device"
-                session["mode"] = "booking"
+                # Point customers to the public booking page instead of collecting
+                # the full booking flow inside chat.
+                session["step"] = "idle"
+                session["mode"] = "chat"
                 reply = r(
-                    "Great! I'll help you book a repair. 🔧\n\nWhat device do you have and what's the issue? (e.g. iPhone 13, cracked screen)",
-                    "Zabardast! Booking mein madad karta hun. 🔧\n\nKaun sa device hai aur kya masla hai? (maslan: iPhone 13, screen toot gayi)",
-                    "بہت اچھا! بکنگ میں مدد کروں گا۔ 🔧\n\nکون سا ڈیوائس ہے اور کیا مسئلہ ہے؟", lang
+                    f"Great! You can book a repair on our booking page:\n\n🔗 {BOOKING_PAGE_URL}\n\nOpen that link to pick your device, issue, date and time — it only takes a minute. If you have any questions first, just ask me here!",
+                    f"Zabardast! Repair book karne ke liye yeh link kholen:\n\n🔗 {BOOKING_PAGE_URL}\n\nWahan device, masla, date aur time choose kar sakte hain. Koi sawal ho to yahan pooch lein!",
+                    f"بہت اچھا! مرمت بک کرنے کے لیے یہ لنک کھولیں:\n\n🔗 {BOOKING_PAGE_URL}\n\nوہاں ڈیوائس، مسئلہ، تاریخ اور وقت منتخب کریں۔ سوال ہو تو یہاں پوچھیں!",
+                    lang,
                 )
             else:
                 system_prompt = f"""You are a helpful assistant for FixPro iPhone Repair in Lahore, Pakistan.
 Answer the customer's question using the shop info below. Be helpful, concise, and friendly.
 Reply in the same language as the customer (English, Roman Urdu, or Urdu).
-Keep response under 120 words. End by asking if they'd like to book an appointment.
+Keep response under 120 words. If relevant, mention they can book anytime at {BOOKING_PAGE_URL}.
 
 {PROMPT_SECURITY_RULES}
 
