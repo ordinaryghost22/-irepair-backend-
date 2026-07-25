@@ -50,3 +50,5 @@ yarl==1.24.2
 resend
 apscheduler
 reportlab
+web3
+eth-account
