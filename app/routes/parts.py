@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from io import BytesIO
 from typing import Literal, Optional
 
+import qrcode
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from supabase import create_client
 from web3 import Web3
@@ -245,3 +248,69 @@ def install_parts(body: InstallPartsBody, user=Depends(verify_token)):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{batch_number}/qrcode")
+def get_batch_qrcode(batch_number: str):
+    _get_batch_by_number(batch_number)
+    try:
+        url = f"https://irepair-dashboard.vercel.app/verify/{batch_number}"
+        img = qrcode.make(url)
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        buf.seek(0)
+        return StreamingResponse(buf, media_type="image/png")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"QR code generation failed: {e}")
+
+
+@router.get("/{batch_number}/verify")
+def verify_batch(batch_number: str):
+    batch = _get_batch_by_number(batch_number)
+
+    try:
+        events_res = (
+            supabase.table("part_events")
+            .select("event_type, location, repair_id, data_hash, created_at")
+            .eq("batch_id", batch["id"])
+            .order("created_at", desc=False)
+            .execute()
+        )
+        events = events_res.data or []
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch part events: {e}")
+
+    try:
+        on_chain_hash = get_latest_hash(batch_number)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Blockchain verification failed: {e}",
+        )
+
+    latest_hash = events[-1]["data_hash"] if events else None
+    verified = (
+        latest_hash is not None
+        and on_chain_hash.lower() == str(latest_hash).lower()
+    )
+
+    return {
+        "batch": {
+            "supplier_name": batch["supplier_name"],
+            "batch_number": batch["batch_number"],
+            "part_type": batch["part_type"],
+            "received_date": batch["received_date"],
+        },
+        "events": [
+            {
+                "event_type": e["event_type"],
+                "location": e.get("location"),
+                "repair_id": e.get("repair_id"),
+                "timestamp": e.get("created_at"),
+            }
+            for e in events
+        ],
+        "verified": verified,
+    }

@@ -52,3 +52,4 @@ apscheduler
 reportlab
 web3
 eth-account
+qrcode[pil]
